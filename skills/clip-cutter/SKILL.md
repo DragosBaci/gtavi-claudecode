@@ -32,6 +32,8 @@ Before running:
 
 To fine-tune by hand (cut words, move the hook, fix the webcam crop), run `python "${CLAUDE_PLUGIN_ROOT}/scripts/editor.py"` and open http://127.0.0.1:8766: it edits the same options and renders with `cut.py`.
 
+When the human has the editor open, make your edits through it instead of re-running `cut.py`: POST the steps to `http://127.0.0.1:8766/api/agent` (`{"clip": "<job>/<clip name>", "steps": [...]}`, see the README) and the editor performs them with a visible "Claude" cursor they can watch and undo. The response says `editor_open: false` when nobody has that clip open.
+
 After running:
 
 1. Output is an mp4 in `jobs/<id>/edits`. It prints `edit: N piece(s), 34.2s -> 26.7s`. Check the first 2 seconds: speech from the first frame, the tease makes sense alone, captions readable. No credit text is burned into the video; the poster credits the creator in the post.

@@ -21,7 +21,8 @@ PAGE = HERE.parent / "editor" / "index.html"
 FONTS = (HERE.parent / "fonts").resolve()
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}$")
 TRANSITION_NAMES = ("zoom", "whip", "slide", "fade", "pixel", "circle", "dissolve", "flash", "cut", "rewind")
-RENDERS = {}           # id -> {"proc", "log", "job", "name", "started"}
+RENDERS = {}           # id -> {"proc", "log", "job", "name", "started", "by"}
+PORT = 8766
 LOCK = threading.Lock()
 _probe_cache = {}
 
@@ -272,7 +273,7 @@ def render(body):
     f.write("$ " + " ".join(cmd) + "\n\n"); f.flush()
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=f, stderr=subprocess.STDOUT)
     with LOCK:
-        RENDERS[rid] = {"proc": proc, "log": log, "job": job, "name": name, "started": time.time()}
+        RENDERS[rid] = {"proc": proc, "log": log, "job": job, "name": name, "started": time.time(), "by": str(body.get("by") or "")[:24]}
     return {"id": rid}
 
 
@@ -297,6 +298,107 @@ def render_status(rid):
         if l.startswith("facecam:"): stage = "webcam found, encoding"
     return {"state": "running" if code is None else ("done" if code == 0 else "error"), "code": code,
             "elapsed": round(time.time() - r["started"], 1), "stage": stage, "log": lines[-14:], "output": out}
+
+
+# ------------------------------------------------------------------ waveform
+
+def wave(job, video_url):
+    """Peak level per 25 ms of the video's audio, 0..1, for the timeline waveform. Cached."""
+    d = job_dir(job)
+    path = (JOBS / video_url.split("/media/", 1)[1].split("?")[0]).resolve()
+    if JOBS not in path.parents or not path.exists():
+        raise ValueError("bad video")
+    out = d / "editor" / f"wave_{path.stem}.json"
+    if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
+        return load_json(out)
+    import array
+    raw = subprocess.run([tool("ffmpeg"), "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                         capture_output=True, check=True).stdout
+    a = array.array("h"); a.frombytes(raw[: len(raw) // 2 * 2])
+    hop = 200   # 25 ms at 8 kHz
+    peaks = [max((abs(x) for x in a[i:i + hop]), default=0) for i in range(0, len(a), hop)]
+    top = sorted(peaks)[int(len(peaks) * 0.98)] if peaks else 1
+    res = {"hop": 0.025, "peaks": [round(min(1.0, p / max(1, top)), 3) for p in peaks]}
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(res))
+    return res
+
+
+# ------------------------------------------------------------------ presence: live cursors, shared edits, agent steps
+# Every open editor window posts its cursor ~7 times a second. Windows on the same clip see each other's cursors,
+# share the latest edit state (last writer wins), and pick up agent jobs: scripted edits (POST /api/agent) that the
+# page performs with a visible "Claude" cursor. Kept in memory; restarting the server clears it.
+
+PRES, SHARED, AGENT = {}, {}, {}
+
+
+def clip_render(clip):
+    job, _, name = clip.partition("/")
+    for rid, r in sorted(RENDERS.items(), reverse=True):
+        if r["job"] == job and r["name"] == name:
+            st = render_status(rid)
+            if st["state"] == "running" or time.time() - r["started"] - st["elapsed"] < 0.5:
+                return {"id": rid, "state": st["state"], "stage": st["stage"], "elapsed": st["elapsed"], "by": r.get("by")}
+            return {"id": rid, "state": st["state"], "stage": st["stage"], "elapsed": st["elapsed"], "by": r.get("by")}
+    return None
+
+
+def presence(body):
+    now = time.time()
+    sid = str(body.get("sid", ""))[:40]
+    clip = str(body.get("clip", ""))[:200]
+    if not sid:
+        raise ValueError("sid")
+    with LOCK:
+        me = PRES.setdefault(sid, {})
+        me.update(sid=sid, name=str(body.get("name", "?"))[:24], color=str(body.get("color", "#ffffff"))[:16], clip=clip,
+                  cursor=body.get("cursor"), action=str(body.get("action") or "")[:80] or None, at=now)
+        for g in body.get("ghosts") or []:   # agent cursors this window is animating
+            gid = "ghost:" + str(g.get("sid", ""))[:40]
+            PRES[gid] = {"sid": gid, "name": str(g.get("name", "Claude"))[:24], "color": str(g.get("color", "#d97757"))[:16],
+                         "clip": clip, "cursor": g.get("cursor"), "action": str(g.get("action") or "")[:80] or None,
+                         "at": now, "owner": sid, "ghost": True}
+        if body.get("state") is not None:
+            cur = SHARED.get(clip, {"v": 0})
+            SHARED[clip] = {"v": cur["v"] + 1, "state": body["state"], "by": sid, "name": me["name"],
+                            "action": str(body.get("state_action") or "")[:80], "at": now}
+        for s_ in [s_ for s_, p in PRES.items() if now - p["at"] > 30]:
+            PRES.pop(s_, None)
+        peers = [{k: p.get(k) for k in ("sid", "name", "color", "cursor", "action", "ghost")}
+                 for s_, p in PRES.items() if s_ != sid and p.get("clip") == clip and now - p["at"] < 4 and p.get("owner") != sid]
+        sh = SHARED.get(clip)
+        shared = dict(sh) if sh and sh["v"] > int(body.get("known_v") or 0) and sh["by"] != sid else None
+        jobs = []
+        for j in AGENT.get(clip, []):
+            if j["id"] in (body.get("agent_done") or []):
+                j["state"] = "done"
+            if j["state"] == "queued":
+                j["state"], j["claimed_by"] = "running", sid
+                jobs.append(j)
+    return {"peers": peers, "shared": shared, "v": sh["v"] if sh else 0, "agent": jobs, "render": clip_render(clip)}
+
+
+def agent_post(body):
+    clip = str(body.get("clip", ""))
+    job, _, name = clip.partition("/")
+    job_dir(job)
+    if not NAME_RE.match(name):
+        raise ValueError("clip must be <job>/<clip name>")
+    steps = body.get("steps")
+    if not isinstance(steps, list) or not steps or len(steps) > 60:
+        raise ValueError("steps: a list of 1-60 steps")
+    j = {"id": f"a{int(time.time() * 1000)}", "name": str(body.get("name") or "Claude")[:24], "steps": steps,
+         "state": "queued", "at": time.time()}
+    with LOCK:
+        AGENT.setdefault(clip, []).append(j)
+        AGENT[clip] = AGENT[clip][-20:]
+    open_now = any(p.get("clip") == clip and time.time() - p["at"] < 4 and not p.get("ghost") for p in PRES.values())
+    return {"id": j["id"], "state": j["state"], "editor_open": open_now,
+            "note": None if open_now else f"open http://127.0.0.1:{PORT}/?job={job}&name={name} to watch it run"}
+
+
+def agent_status(clip):
+    return [{k: j.get(k) for k in ("id", "name", "state", "at")} for j in AGENT.get(clip, [])]
 
 
 # ------------------------------------------------------------------ http
@@ -375,6 +477,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(strip(q["job"], q["video"]))
             if u.path == "/api/render":
                 return self.send_json(render_status(q["id"]))
+            if u.path == "/api/wave":
+                return self.send_json(wave(q["job"], q["video"]))
+            if u.path == "/api/agent":
+                return self.send_json(agent_status(q["clip"]))
         except (ValueError, KeyError, StopIteration, subprocess.CalledProcessError) as e:
             return self.send_json({"error": str(e) or e.__class__.__name__}, 400)
         self.send_error(404)
@@ -385,6 +491,10 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             if u.path == "/api/render":
                 return self.send_json(render(body))
+            if u.path == "/api/presence":
+                return self.send_json(presence(body))
+            if u.path == "/api/agent":
+                return self.send_json(agent_post(body))
         except (ValueError, KeyError, TypeError) as e:
             return self.send_json({"error": str(e) or e.__class__.__name__}, 400)
         self.send_error(404)
@@ -394,6 +504,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8766)
     a = ap.parse_args()
+    global PORT
+    PORT = a.port
     if not JOBS.is_dir():
         sys.exit(f"no jobs/ folder in {ROOT}: run this from the clip desk folder")
     print(f"Clip editor: http://127.0.0.1:{a.port}  (jobs in {JOBS})", flush=True)

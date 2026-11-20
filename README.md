@@ -102,6 +102,18 @@ python scripts/editor.py        # then open http://127.0.0.1:8766
 
 Every render saves its options in the clip's `.json`, so the editor reopens a clip exactly as it was made.
 
+**Live cursors.** Every window open on the same clip shows the others' cursors with their names, and edits sync between them. While a render runs, a `cut.py` cursor sits on the Render button and shows its stage.
+
+**Claude in the editor.** Scripted edits posted to `/api/agent` are performed in the open editor by a visible "Claude" cursor (select words, click Cut, pick a transition, render), so you watch the work and can undo any step:
+
+```
+curl -s localhost:8766/api/agent -H 'Content-Type: application/json' -d '{"clip": "<job>/<clip name>", "steps": [
+  {"do": "select", "text": "we gotta do a backflip"}, {"do": "cut"},
+  {"do": "set", "key": "transition", "value": "zoom"}, {"do": "render"}]}'
+```
+
+Steps: `say {text}`, `select {text}` or `select {a, b}` (source seconds), `cut`, `restore`, `keep`, `hook`, `start`, `end`, `hook_on`, `hook_off`, `set {key, value}` (layout, captions, title_style, transition, keep_after_tease), `title {text}`, `crop {box: [x, y, w, h]}`, `seek {t}`, `play`, `preview_transition`, `render`, `wait {ms}`.
+
 Windows, macOS or Linux, Python 3.10+. An NVIDIA GPU makes transcription faster; on the CPU a 12-minute video takes about 5 minutes.
 
 MIT license.
