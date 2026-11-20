@@ -86,6 +86,7 @@ python scripts/moments.py "https://www.youtube.com/watch?v=..." --top 8
 python scripts/cut.py jobs/<id> --pick 2 --layout facecam --hook "Nobody noticed this"
 python scripts/check.py jobs/<id>/edits/clip_2.mp4 --campaign campaigns.md
 python scripts/live.py "https://www.youtube.com/watch?v=<live>" --minutes 60
+python scripts/watch.py https://twitch.tv/<a> https://twitch.tv/<b> --minutes 120   # several streams, clips when chat explodes
 python scripts/editor.py        # then open http://127.0.0.1:8766
 ```
 

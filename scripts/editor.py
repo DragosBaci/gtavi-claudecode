@@ -154,7 +154,9 @@ def project(job, name=None, set_=None, pick=None):
         video, off, set_, pick = find_video(d, meta)
     else:
         c = candidates(d, set_ or "candidates_audit")
-        p = next((x for x in c["candidates"] if x["n"] == int(pick)), None)
+        if pick is None and c["candidates"]:   # a new (unrendered) clip reopened by name: its job's first pick
+            pick = c["candidates"][0]["n"]
+        p = next((x for x in c["candidates"] if x["n"] == int(pick)), None) if pick is not None else None
         if not p:
             raise ValueError("unknown pick")
         video, off = (ROOT / p["file"], p.get("offset", 0)) if p.get("file") else (ROOT / c["source"], 0)
