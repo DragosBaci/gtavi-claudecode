@@ -343,47 +343,77 @@ def track_face(video, start, end, face, fps=2.0):
              "size": round(float(sz[i] / H), 4)} for i in range(n)]
 
 
-def _pw(ts, vs):
-    """Piecewise-linear ffmpeg expression in t (commas escaped for a filtergraph)."""
-    if len(ts) == 1:
-        return f"{vs[0]:.2f}"
-    expr = f"{vs[-1]:.2f}"
-    for i in range(len(ts) - 2, -1, -1):
-        dt = max(1e-3, ts[i + 1] - ts[i])
-        expr = f"if(lt(t\\,{ts[i + 1]:.3f})\\,{vs[i]:.2f}+({vs[i + 1] - vs[i]:.2f})*(t-{ts[i]:.3f})/{dt:.3f}\\,{expr})"
+def _steps(ts, vs):
+    """Piecewise-constant ffmpeg expression in t: vs[i] from ts[i] on (commas escaped for a filtergraph)."""
+    expr = f"{vs[-1]}"
+    for i in range(len(vs) - 2, -1, -1):
+        expr = f"if(lt(t\\,{ts[i + 1]:.3f})\\,{vs[i]}\\,{expr})"
     return expr
 
 
-def face_crop_expr(track, src_w, src_h, out_w, out_h, eyes_at=0.40, head_fill=0.38, bounds=None):
-    """ffmpeg crop for a face panel of aspect out_w:out_h that follows the smoothed face.
-    head_fill = face box height / crop height (0.38 shows head and shoulders). Eyes sit at eyes_at of the panel height,
-    the face is horizontally centred, the face box never leaves the crop and the crop never leaves the frame.
-    Returns {"w","h" (even ints, fixed: ffmpeg cannot animate crop size), "x","y" (expressions in t, commas escaped as \\,
-    so they drop straight into a filtergraph), "filter": "crop=w:h:x:y"}. track t is seconds from the cut start (use after -ss)."""
+def face_crop_expr(track, src_w, src_h, out_w, out_h, eyes_at=0.36, head_fill=0.38, bounds=None,
+                   eye_band=0.22, x_band=0.5, min_shot=3.0):
+    """Face-panel crop (aspect out_w:out_h) that holds still, like a locked-off camera.
+
+    A crop that follows the face pans all the time and trails behind it, which looks like a shaky, lagging camera.
+    Instead the crop is framed on the eye line: within a shot the eyes stay inside a band of `eye_band` of the panel
+    height centred on `eyes_at`, and the face centre inside the middle `x_band` of the width. The crop grows (up to
+    the webcam's size) to give the movement that room. If the face still leaves the band (the streamer stands up,
+    or an auto-framing webcam zooms), the clip is split into shots: each shot keeps one fixed position and the next
+    starts with a hard cut, never a pan. Shots shorter than `min_shot` seconds are merged so it never cuts back and forth.
+    head_fill = face height / crop height (0.38 shows head and shoulders) is the tightest framing allowed.
+    The crop never leaves `bounds` (the webcam's inner borders).
+    Returns {"w","h" (even ints), "x","y" (even ints, or step expressions in t when there are several shots),
+    "shots": [(t_start, x, y)], "filter": "crop=w:h:x:y"}. track t is seconds from the cut start (use after -ss)."""
     if not track:
         return None
     ar = out_w / out_h
     L, T, R, B = bounds if bounds else (0, 0, src_w, src_h)                 # crop must stay inside the webcam
     bw, bh = R - L, B - T
-    size = float(np.median([k["size"] for k in track])) * src_h          # face height px
-    ch = min(size / head_fill, bh, bw / ar)                               # too big for the cam: zoom in instead
-    cw = ch * ar
-    cw = max(2, int(cw) // 2 * 2); ch = max(2, int(round(cw / ar)) // 2 * 2)
-    if ch > src_h:
-        ch = src_h // 2 * 2; cw = max(2, int(ch * ar) // 2 * 2)
-    xs, ys, ts = [], [], []
-    for k in track:
-        fcx, fcy = k["cx"] * src_w, k["cy"] * src_h
-        fh_ = k["size"] * src_h; fw_ = 0.8 * fh_
-        x = fcx - cw / 2
-        y = (fcy - 0.12 * fh_) - eyes_at * ch                              # eyes sit ~0.12 face heights above the box centre
-        lo, hi = max(L, fcx + fw_ / 2 - cw), min(R - cw, fcx - fw_ / 2)  # keep the whole face box inside
-        if lo <= hi: x = min(max(x, lo), hi)
-        lo, hi = max(T, fcy + fh_ / 2 - ch), min(B - ch, fcy - fh_ / 2)
-        if lo <= hi: y = min(max(y, lo), hi)
-        xs.append(min(max(x, L), R - cw)); ys.append(min(max(y, T), B - ch)); ts.append(k["t"])
-    x_e, y_e = _pw(ts, xs), _pw(ts, ys)
-    return {"w": cw, "h": ch, "x": x_e, "y": y_e, "filter": f"crop={cw}:{ch}:{x_e}:{y_e}"}
+    ts = np.array([k["t"] for k in track], float)
+    fcx = np.array([k["cx"] for k in track]) * src_w
+    fh = np.array([k["size"] for k in track]) * src_h
+    ey = np.array([k["cy"] for k in track]) * src_h - 0.12 * fh          # eyes ~0.12 face heights above the box centre
+    size = float(np.median(fh))
+    ch = max(size / head_fill, np.ptp(ey) / eye_band, np.ptp(fcx) / (x_band * ar))   # room for all the movement
+    ch = min(ch, bh, bw / ar, src_h)                                      # but never bigger than the cam
+    cw = max(2, int(ch * ar) // 2 * 2); ch = max(2, int(round(cw / ar)) // 2 * 2)
+
+    # greedy shots: extend while the eyes stay in the band and the face centre in the middle of the width
+    fits = lambda a, b: np.ptp(ey[a:b]) <= eye_band * ch and np.ptp(fcx[a:b]) <= x_band * cw
+    shots, i = [], 0
+    while i < len(ts):
+        j = i + 1
+        while j < len(ts) and fits(i, j + 1):
+            j += 1
+        shots.append([i, j])
+        i = j
+    merged = []
+    for s in shots:                                                       # no shot shorter than min_shot
+        if merged and (ts[min(s[1], len(ts) - 1)] - ts[s[0]] < min_shot or ts[merged[-1][1] - 1] - ts[merged[-1][0]] < min_shot):
+            merged[-1][1] = s[1]
+        else:
+            merged.append(s)
+
+    def place(a, b):
+        sl = slice(a, b)
+        x = (fcx[sl].min() + fcx[sl].max()) / 2 - cw / 2                  # centre of the shot's movement
+        y = (ey[sl].min() + ey[sl].max()) / 2 - eyes_at * ch              # eye band centred on eyes_at
+        return int(min(max(x, L), R - cw)) // 2 * 2, int(min(max(y, T), B - ch)) // 2 * 2
+
+    out = []
+    for a, b in merged:
+        x, y = place(a, b)
+        t0 = 0.0 if not out else float(ts[a])
+        if out and (x, y) == out[-1][1:]:
+            continue
+        out.append((t0, x, y))
+    if len(out) == 1:
+        x_e, y_e = out[0][1], out[0][2]
+    else:
+        x_e = _steps([o[0] for o in out], [o[1] for o in out])
+        y_e = _steps([o[0] for o in out], [o[2] for o in out])
+    return {"w": cw, "h": ch, "x": x_e, "y": y_e, "shots": out, "filter": f"crop={cw}:{ch}:{x_e}:{y_e}"}
 
 
 def has_gameplay(video, start, end, cam_box, info=False):

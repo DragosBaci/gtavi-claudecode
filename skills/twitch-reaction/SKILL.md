@@ -19,9 +19,11 @@ Face on top, game below, a big title on the seam. The format of most viral GTA 6
 ## 3. Cut the reaction clip
 
 ```
-python "${CLAUDE_PLUGIN_ROOT}/scripts/cut.py" jobs/<id> --pick 1 --layout react --cam auto \
-  --title "Speed REALIZED why GTA 6 took ROCKSTAR 13 YEARS" --title-style box --captions bubble
+python "${CLAUDE_PLUGIN_ROOT}/scripts/cut.py" jobs/<id> --set candidates_audit --pick 1 --layout react --cam auto \
+  --title "Speed REALIZED why GTA 6 took 13 YEARS" --title-style box --captions word
 ```
+
+Pick the moment by reading the transcript (`moment-finder`, "How to pick"): start on a line that makes sense alone, end on the payoff, choose a 1-3 s tease. `cut.py` plays the tease first, trims to the speech, removes pauses and adds a punch-in zoom (see `clip-cutter`).
 
 - `--cam auto` finds the streamer's webcam itself (face detection plus the webcam frame around it). It prints where it found the cam. If it finds no stable face it falls back to the blur layout and says so. Check the first frame once; if the crop is wrong, pass `--cam x:y:w:h` fractions.
 - `--title-style box`: white band with bold black text on the seam. `--title-style outline`: white text with a thick black outline across the top of the game, for short titles ("Fighting Cops in GTA 6").

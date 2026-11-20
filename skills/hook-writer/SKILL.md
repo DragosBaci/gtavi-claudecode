@@ -18,13 +18,18 @@ Write 3 options per clip. Sentence case. Short: 3 to 9 words fit the hook box.
 
 ## Reaction titles (twitch-reaction layout)
 
-For a streamer's reaction clip the title sits on the seam between face and game for the whole clip. Formula: streamer name + reaction verb + what they reacted to, with CAPS on 2 or 3 key words.
+For a streamer's reaction clip the title sits on the seam between face and game for the whole clip. It is read in the first second, together with the tease, so its job is to open a question the clip answers, not to summarise the clip.
 
-- "Speed REALIZED why GTA 6 took ROCKSTAR 13 YEARS"
-- "Kai LOST IT when the cops showed up in GTA 6"
-- "Fighting Cops in GTA 6" (outlined style: short, 3 to 6 words)
+- 4 to 9 words, at most 2 lines. CAPS on 1 or 2 key words.
+- Streamer name (people know them) + the situation, leaving out the outcome.
+- Summary (bad) -> curiosity (good):
+  - "Kai Cenat made Jason take a shower in GTA 6" -> "Kai Cenat found the SHOWER in GTA 6"
+  - "Kai Cenat turned on a setting by accident and couldn't figure out why he was glowing" -> "Kai is GLOWING in GTA 6 and has no idea why"
+  - "Caylus went to collect rent in GTA 6 and it got weird" -> "Collecting rent in GTA 6 got WEIRD for Caylus"
+  - "GTA 6 cops know your outfit, so Kai went to the barber" -> "GTA 6 cops remember your OUTFIT"
+- Other shapes: "Speed REALIZED why GTA 6 took 13 YEARS", "Kai LOST IT when the cops showed up in GTA 6", "Fighting Cops in GTA 6" (outlined style: 3 to 6 words).
 
-Describe what happens on screen. Never put words in the streamer's mouth: no quotes they did not say, no made-up opinions. Emojis are optional, at most 2.
+Describe what happens on screen. Never put words in the streamer's mouth: no quotes they did not say, no made-up opinions. Emojis do not render on the video (put them in the post caption).
 
 ## What does not work
 

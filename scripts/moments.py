@@ -10,7 +10,7 @@ import argparse, json, math, re, sys, wave
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
-from common import ffprobe, is_url, job_dir, load_json, run, save_json, tool, ytdlp_base, ytdlp_json
+from common import VIDEO_FMT, ffprobe, is_url, job_dir, load_json, run, save_json, tool, ytdlp_base, ytdlp_json
 
 HYPE = re.compile(r"\b(no way|oh my god|omg|what|wait|bro|let'?s go|holy|insane|crazy|yo+|wtf|dude|look at|nah|run|go go)\b", re.I)
 CHAT_HYPE = re.compile(r"(LMAO|LOL|KEKW|OMEGALUL|W+\b|CLIP|💀|😂|🔥|NO WAY|HOLY)", re.I)
@@ -24,11 +24,18 @@ def fetch(src, d, max_min):
                                                              "duration", "view_count", "upload_date", "heatmap", "is_live", "was_live")})
         vid = d / "source.mp4"
         if not vid.exists():
-            args = ytdlp_base() + ["-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/b", "--merge-output-format", "mp4",
-                                   "-o", str(vid)]
+            # Download the whole file with yt-dlp's own chunked downloader, then trim locally.
+            # (--download-sections pipes through ffmpeg on one connection, which YouTube throttles to ~real time.)
+            full = d / "source.full.mp4"
+            if not full.exists():
+                run(ytdlp_base() + ["-N", "4", "-f", VIDEO_FMT,
+                                    "--merge-output-format", "mp4", "-o", str(full), src])
             if (info.get("duration") or 0) > max_min * 60:
-                args += ["--download-sections", f"*0-{max_min * 60}"]
-            run(args + [src])
+                run([tool("ffmpeg"), "-y", "-v", "error", "-i", str(full), "-t", str(max_min * 60), "-c", "copy",
+                     "-movflags", "+faststart", str(vid)])
+                full.unlink()
+            else:
+                full.rename(vid)
         if info.get("was_live") and not (d / "chat.json").exists():  # YouTube chat replay
             run(ytdlp_base() + ["--skip-download", "--write-subs", "--sub-langs", "live_chat", "-o", str(d / "chat"), src], check=False)
     else:
@@ -120,8 +127,16 @@ def main():
     vid, info = fetch(a.src, d, a.max_minutes)
     dur = float(ffprobe(vid)["format"]["duration"])
     wav, db = audio_rms(vid, d)
-    n = len(db)
     words = transcribe(wav, d)
+    score(d, str(vid), info, dur, db, words, a.top, a.min, a.max, a.chat)
+
+
+def score(d, source, info, dur, db, words, top=8, min_len=15, max_len=40, chat_arg=None, name="candidates"):
+    """Score every second and write <name>.json/.md with the best non-overlapping windows."""
+    from types import SimpleNamespace
+    a = SimpleNamespace(top=top, min=min_len, max=max_len, chat=chat_arg)
+    vid = source
+    n = len(db)
     # signals
     loud = smooth(np.clip(z(db - smooth(db, 30)), 0, None), 3)          # jumps above the local level
     hype = np.zeros(n)
@@ -167,7 +182,7 @@ def main():
     for i, x in enumerate(picks, 1):
         x["n"] = i
     meta = load_json(d / "info.json")
-    save_json(d / "candidates.json", {"source": str(vid), "info": meta, "duration": dur, "candidates": picks,
+    save_json(d / f"{name}.json", {"source": str(vid), "info": meta, "duration": dur, "candidates": picks,
                                       "signals": {"heatmap": bool(w_heat), "chat": bool(w_chat), "words": len(words)}})
     fmt = lambda t: f"{int(t // 60)}:{int(t % 60):02d}"
     md = [f"# Candidates: {meta.get('title', '')}", f"source: {meta.get('webpage_url', '')}",
@@ -175,8 +190,9 @@ def main():
     for x in picks:
         md += [f"## {x['n']}. {fmt(x['start'])}-{fmt(x['end'])} ({x['end'] - x['start']:.0f}s) score {x['score']}",
                f"why: {', '.join(x['why'])}", f"> {x['text']}", ""]
-    (d / "candidates.md").write_text("\n".join(md), encoding="utf-8")
-    print(f"job: {d}\n{len(picks)} candidates -> {d / 'candidates.md'}")
+    (d / f"{name}.md").write_text("\n".join(md), encoding="utf-8")
+    print(f"job: {d}\n{len(picks)} candidates -> {d / f'{name}.md'}")
+    return picks
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ def main():
     add("resolution 1080x1920", bool(v) and (v.get("width"), v.get("height")) == (1080, 1920),
         f"{v.get('width')}x{v.get('height')}" if v else "no video")
     f = fps_of(v.get("r_frame_rate", "0/1")) if v else 0
-    add("fps about 30", 29 <= f <= 31, f"{f:.2f}")
+    add("fps 24-60 (cut.py keeps the source rate up to 60)", 23.9 <= f <= 60.1, f"{f:.2f}")
     add("has audio", au is not None)
     add(f"duration {rules['min']:g}-{rules['max']:g}s" + ("" if have_campaign else " (default)"),
         rules["min"] <= dur <= rules["max"], f"{dur:.1f}s")

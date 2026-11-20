@@ -1,17 +1,72 @@
 """Cut one candidate into a finished vertical clip.
 
-1080x1920, 30 fps, word-by-word burned captions (slurs and swears masked), hook box in the first seconds,
-loudness normalised to -14 LUFS. Writes jobs/<id>/edits/clip_<n>.mp4 + .json (metadata for check.py).
+1080x1920 at the source frame rate (up to 60 fps), word-by-word burned captions timed by forced alignment
+(align.py; slurs and swears masked), loudness normalised to -14 LUFS, high-quality encode for re-upload.
+
+Hook-first editing (all on by default, each can be turned off):
+  --tease S:E     the culminating moment (source seconds, 1-2 s) plays first, then a fast rewind (--transition), then the
+                  clip restarts from the setup and builds up to that moment, ending right after it (--after-tease 0.8).
+                  Default: the pick's "tease" field from picks.json (add_picks.py).
+  trim            start on the first word, end shortly after the last one (longer while it is still loud: laughter).
+  --tighten 0.45  cut pauses in the speech longer than this (kept when the pause is loud: screams, laughs, explosions).
+  punch-in        quick zoom over the first 0.4 s so the first frame moves.
+Writes jobs/<id>/edits/clip_<n>.mp4 + .json (metadata for check.py).
 
 usage: python cut.py jobs/<id> --pick 1 [--layout fill|blur|facecam|react] [--hook "TEXT"]
                      [--cam auto|x:y:w:h] [--title "TEXT" --title-style box|outline --title-secs 0] [--captions word|bubble|none]
+                     [--tease S:E | --no-tease] [--tighten 0.45 | --tighten 0] [--no-trim] [--no-punch] [--fast-words]
 """
-import argparse, sys
+import argparse, math, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from common import load_json, run, save_json, tool
 
 W, H = 1080, 1920
+FONTS = Path(__file__).resolve().parent.parent / "fonts"   # Montserrat (SIL OFL), loaded by libass via fontsdir
+CAP_FONT, TITLE_FONT = "Montserrat Black", "Montserrat ExtraBold"
+CAP_SIZE, TITLE_SIZE = 118, 80
+LIBASS_SCALE = 0.786   # measured: libass draws Montserrat this much narrower than PIL at the same nominal size
+
+
+def text_width(text, size, font_file="Montserrat-ExtraBold.ttf"):
+    """Rendered width in px of `text` at ASS font size `size` (libass sizes fonts by ascent+descent, not em)."""
+    try:
+        from PIL import ImageFont
+        probe = ImageFont.truetype(str(FONTS / font_file), 100)
+        asc, desc = probe.getmetrics()
+        px = ImageFont.truetype(str(FONTS / font_file), max(1, round(size * 100 / (asc + desc)))).getlength(text)
+        return px * LIBASS_SCALE
+    except Exception:
+        return len(text) * size * 0.5
+
+
+def wrap_px(text, size, max_w, font_file="Montserrat-ExtraBold.ttf"):
+    """Fewest lines that fit max_w, with the words spread evenly over them (no lone "GTA 6" on line two).
+    A short number stays with the word before it ("GTA 6" is never split)."""
+    words = []
+    for wd in text.split():
+        if words and _re.fullmatch(r"\d{1,2}\W*", wd):
+            words[-1] += " " + wd
+        else:
+            words.append(wd)
+    lines, cur = [], ''
+    for wd in words:
+        cand = (cur + ' ' + wd).strip()
+        if cur and text_width(cand, size, font_file) > max_w:
+            lines.append(cur); cur = wd
+        else:
+            cur = cand
+    lines += [cur] if cur else []
+    if len(lines) == 2:   # balance two lines: the split with the narrowest wider line
+        best = None
+        for k in range(1, len(words)):
+            a_, b_ = ' '.join(words[:k]), ' '.join(words[k:])
+            wa, wb = text_width(a_, size, font_file), text_width(b_, size, font_file)
+            if max(wa, wb) <= max_w and (best is None or max(wa, wb) < best[0]):
+                best = (max(wa, wb), [a_, b_])
+        if best:
+            lines = best[1]
+    return lines
 
 
 def ts(t):
@@ -51,7 +106,7 @@ def wrap(text, width):
     return lines + ([cur] if cur else [])
 
 
-def build_ass(words, s0, e0, hook, cap_y, title=None, caps='word', profanity=False):
+def build_ass(words, s0, e0, hook, cap_y, title=None, caps='word', profanity=False, clear_at=()):
     hdr = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -60,29 +115,37 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Arial Black,92,&H00FFFFFF,&H0000E5FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,5,60,60,0,1
-Style: Hook,Arial Black,68,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
-Style: TitleBox,Arial Black,66,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,1,0,0,5,40,40,0,1
-Style: TitleOut,Arial Black,80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,9,2,8,50,50,0,1
-Style: Bubble,Arial,58,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,16,0,5,60,60,0,1
+Style: Cap,{CAP_FONT},{CAP_SIZE},&H00FFFFFF,&H0000E5FF,&H00000000,&H90000000,0,0,0,0,100,100,1,0,1,10,5,5,70,70,0,1
+Style: Hook,{CAP_FONT},88,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
+Style: TitleBox,{TITLE_FONT},{TITLE_SIZE},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,5,40,40,0,1
+Style: TitleBoxBG,Arial,20,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
+Style: TitleOut,{CAP_FONT},100,&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,0,0,0,0,100,100,0,0,1,9,4,8,50,50,0,1
+Style: Bubble,{TITLE_FONT},76,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,3,16,0,5,60,60,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     ev = []
     ws = [dict(w, w=clean(w["w"], profanity)) for w in words if s0 <= w["s"] < e0 and w["w"]]
-    # groups of up to 3 words, break on punctuation or pauses
+    # punchy groups: 2 words (3 if they are tiny), break on punctuation and on pauses
     groups, cur = [], []
     for w in ws:
-        if cur and (len(cur) == 3 or w["s"] - cur[-1]["e"] > 0.6 or cur[-1]["w"][-1:] in ".?!,"):
+        chars = sum(len(x["w"]) for x in cur) + len(w["w"])
+        full = len(cur) >= 3 or (len(cur) == 2 and chars > 11)
+        if cur and (full or w["s"] - cur[-1]["e"] > 0.35 or cur[-1]["w"][-1:] in ".?!,"):
             groups.append(cur); cur = []
         cur.append(w)
     if cur:
         groups.append(cur)
     hook_end = 2.6 if hook else 0
     for gi, g in enumerate(groups):
-        g_end = groups[gi + 1][0]["s"] if gi + 1 < len(groups) else g[-1]["e"] + 0.4
-        g_end = min(g_end, g[-1]["e"] + 0.8)
+        # stay up until the next group unless there is a real pause (no flicker between groups)
+        nxt = groups[gi + 1][0]["s"] if gi + 1 < len(groups) else None
+        g_end = nxt if nxt is not None and nxt - g[-1]["e"] < 0.5 else g[-1]["e"] + 0.25
+        g_end = min(g_end, e0)
+        for c in clear_at:   # captions never run into the rewind (times on the clip timeline)
+            if g[0]["s"] - s0 < c < g_end - s0:
+                g_end = s0 + c
         for k, w in enumerate(g):
             a = w["s"] - s0; b = (g[k + 1]["s"] - s0) if k + 1 < len(g) else g_end - s0
             if b <= a:
@@ -102,10 +165,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if title:  # reaction title: (style, text, y, seconds)
         st, text, ty, secs = title
         end = (e0 - s0) if secs <= 0 else secs
-        lines = wrap(esc(text), 26 if st == 'box' else 24)
+        text = ''.join(ch for ch in text if ord(ch) < 0x2190 or 0x2E80 <= ord(ch) < 0xFE00).strip()  # libass has no colour emoji
+        padx = 46
+        lines = (wrap_px(esc(text), TITLE_SIZE, W - 60 - 2 * padx) if st == 'box'
+                 else wrap_px(esc(text), 100, W - 100, "Montserrat-Black.ttf"))
         body = '\\N'.join(lines)
-        if st == 'box':
-            ev.append(f"Dialogue: 2,{ts(0)},{ts(end)},TitleBox,,0,0,0,,{{\\pos({W // 2},{ty})}}{body}")
+        if st == 'box':  # white rounded box sized to the measured text, black bold text
+            lh, pady, r = round(TITLE_SIZE * 0.80), 26, 26
+            bw = min(W - 60, int(max(text_width(l, TITLE_SIZE) for l in lines)) + 2 * padx); bh = len(lines) * lh + 2 * pady
+            x0, y0 = (W - bw) // 2, ty - bh // 2
+            shape = (f"m {r} 0 l {bw - r} 0 b {bw} 0 {bw} 0 {bw} {r} l {bw} {bh - r} b {bw} {bh} {bw} {bh} {bw - r} {bh} "
+                     f"l {r} {bh} b 0 {bh} 0 {bh} 0 {bh - r} l 0 {r} b 0 0 0 0 {r} 0")
+            ev.append(f"Dialogue: 2,{ts(0)},{ts(end)},TitleBoxBG,,0,0,0,,{{\\an7\\pos({x0},{y0})\\p1}}{shape}")
+            ev.append(f"Dialogue: 3,{ts(0)},{ts(end)},TitleBox,,0,0,0,,{{\\an5\\pos({W // 2},{ty})}}{body}")
         else:
             ev.append(f"Dialogue: 2,{ts(0)},{ts(end)},TitleOut,,0,0,0,,{{\\pos({W // 2},{ty})\\an8}}{body}")
         hook = ''
@@ -114,7 +186,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return hdr + "\n".join(ev) + "\n"
 
 
-CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560}
+CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560, "split": 960}
 TOP = 730  # react layout: face panel height = seam y (even)
 GAME_H = H - TOP  # 1190
 
@@ -123,36 +195,57 @@ def even(n):
     return int(n) // 2 * 2
 
 
-def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None):
-    """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py."""
+SHARP = "unsharp=5:5:0.8:5:5:0.0"   # light luma sharpening for upscaled webcams
+
+
+def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None, split=0.5,
+                 fps=30, punch=0.0, flashes=()):
+    """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py.
+    fps: output frame rate. punch: zoom-in amount at the start (0.10 = starts 10% zoomed, settles in 0.4 s).
+    flashes: [(t, dur)] short white flashes (tease -> clip transition)."""
+    L = ":flags=lanczos"
     if layout == "fill":
-        v = f"[0:v]scale=-2:{H},crop={W}:{H}[v]"
+        v = f"[0:v]scale=-2:{H}{L},crop={W}:{H}[v]"
     elif layout == "blur":
         v = (f"[0:v]split[a][b];[a]scale=-2:{H},crop={W}:{H},boxblur=24:2,eq=brightness=-0.08[bg];"
-             f"[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
+             f"[b]scale={W}:-2{L}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
+    elif layout == "split":  # content on top, filler gameplay (input 1) below
+        th = even(H * split); bh = H - th
+        v = (f"[0:v]scale={W}:{th}:force_original_aspect_ratio=increase{L},crop={W}:{th},setsar=1,format=yuv420p[top];"
+             f"[1:v]scale={W}:{bh}:force_original_aspect_ratio=increase{L},crop={W}:{bh},setsar=1,format=yuv420p[bot];"
+             f"[top][bot]vstack[v]")
     elif layout == 'react':
         sw, sh = src
-        if face_expr:  # tracked face crop (no cam frame)
+        if face_expr:  # fixed crop around the face (no clean cam frame)
             cw, chh, ex, ey = face_expr
             top = f"crop={cw}:{chh}:{ex}:{ey}"
         else:
             x, y, w, h = map(float, cam.split(':'))
             cw, chh = even(sw * w), even(sh * h)
             top = f"crop={cw}:{chh}:{even(sw * x)}:{even(sh * y)}"
+        up = max(W / max(cw, 1), TOP / max(chh, 1))           # how much the webcam is enlarged
+        sharp = f",{SHARP}" if up > 1.3 else ""
         gw = even(sw * GAME_H / sh) if sw * GAME_H / sh >= W else W
         gx = game_x if game_x is not None else ((gw - W) if cam_side == 'left' else 0)
-        v = (f"[0:v]split[a][b];[a]{top},scale={W}:{TOP}:force_original_aspect_ratio=increase,crop={W}:{TOP},setsar=1[cam];"
-             f"[b]scale={gw}:{GAME_H},crop={W}:{GAME_H}:{even(gx)}:0,setsar=1[game];[cam][game]vstack[v]")
+        v = (f"[0:v]split[a][b];[a]{top},scale={W}:{TOP}:force_original_aspect_ratio=increase{L},crop={W}:{TOP}{sharp},setsar=1[cam];"
+             f"[b]scale={gw}:{GAME_H}{L},crop={W}:{GAME_H}:{even(gx)}:0,setsar=1[game];[cam][game]vstack[v]")
         if band:
             y0, bh, secs = band
             en = f":enable='lte(t,{secs})'" if secs > 0 else ''
             v = v[:-3] + f"[v0];[v0]drawbox=x=0:y={y0}:w=iw:h={bh}:color=white@1:t=fill{en}[v]"
     else:
         x, y, w, h = map(float, cam.split(":"))
-        v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{int(H * 0.38)}:force_original_aspect_ratio=increase,"
-             f"crop={W}:{int(H * 0.38)}[cam];[b]scale=-2:{H - int(H * 0.38)},crop={W}:{H - int(H * 0.38)}[game];[cam][game]vstack[v]")
+        v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{int(H * 0.38)}:force_original_aspect_ratio=increase{L},"
+             f"crop={W}:{int(H * 0.38)},{SHARP}[cam];[b]scale=-2:{H - int(H * 0.38)}{L},crop={W}:{H - int(H * 0.38)}[game];[cam][game]vstack[v]")
+    post = f"fps={fps}"
+    if punch > 0:  # zoom from 1+punch to 1 over the first 0.4 s (ease-out); the frame moves from frame one
+        z = f"if(lt(it\\,0.4)\\,1+{punch}*pow(1-it/0.4\\,2)\\,1)"
+        post += (f",zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={fps}")
+    for t, dur in flashes:
+        post += f",drawbox=x=0:y=0:w=iw:h=ih:color=white@0.7:t=fill:enable='between(t\\,{t:.3f}\\,{t + dur:.3f})'"
     sub = str(ass).replace("\\", "/").replace(":", "\\:")
-    return v + f";[v]fps=30,subtitles='{sub}'[vo]"
+    fdir = str(FONTS).replace("\\", "/").replace(":", "\\:")
+    return v + f";[v]{post},subtitles='{sub}':fontsdir='{fdir}'[vo]"
 
 
 def game_offset(video, s0, e0, src, cam_box):
@@ -196,10 +289,123 @@ def game_offset(video, s0, e0, src, cam_box):
     return bx
 
 
+def loudness(d, a, b, src=None, hop=0.05):
+    """dB per 50 ms for [a, b] source seconds (None if no audio)."""
+    try:
+        import numpy as np
+        from align import window_pcm
+        x, _ = window_pcm(d, a, b, src)
+        n = int(len(x) / (16000 * hop))
+        if n < 2:
+            return None
+        k = int(16000 * hop)
+        return 20 * np.log10(np.sqrt((x[: n * k].reshape(n, k) ** 2).mean(1)) + 1e-9)
+    except Exception:
+        return None
+
+
+def keep_intervals(words, s0, e0, trim=True, tighten=0.45, db=None, db_start=0.0, hop=0.05, keep=()):
+    """[(a, b)] source-second pieces to keep from [s0, e0]: trimmed to the speech, long pauses cut.
+    A pause or tail is kept when it is loud (laughter, screams, explosions are not in the transcript),
+    and the parts of a pause inside a `keep` range (a silent visual moment: a backflip, a reveal) are never cut."""
+    import numpy as np
+    ws = [w for w in words if s0 <= w["s"] < e0]
+    if not ws:
+        return [(s0, e0)]
+    med = float(np.median(db)) if db is not None else 0.0
+
+    def loud(a, b):
+        if db is None:
+            return False
+        i, j = int((a - db_start) / hop), int((b - db_start) / hop)
+        seg = db[max(0, i):max(i + 1, j)]
+        return len(seg) > 0 and float(np.mean(seg)) > med + 4
+
+    a, b = s0, e0
+    if trim:
+        a = max(s0, ws[0]["s"] - 0.12)
+        b = min(e0, ws[-1]["e"] + 0.35)
+        while b < min(e0, ws[-1]["e"] + 1.5) and loud(b, b + 0.1):   # let a laugh finish
+            b += 0.1
+    out, cur = [], a
+    if tighten > 0:
+        for w, nxt in zip(ws, ws[1:]):
+            gap_a, gap_b = w["e"] + 0.15, nxt["s"] - 0.10
+            if nxt["s"] - w["e"] > tighten and gap_b - gap_a >= 0.25 and gap_a > cur and gap_b < b and not loud(gap_a, gap_b):
+                cuts = [(gap_a, gap_b)]
+                for ka, kb in keep:   # take the kept ranges out of the cut
+                    cuts = [p for x, y in cuts for p in ((x, min(y, ka)), (max(x, kb), y)) if p[1] - p[0] >= 0.25]
+                for x, y in cuts:
+                    out.append((cur, x)); cur = y
+    out.append((cur, b))
+    return [(round(x, 3), round(y, 3)) for x, y in out if y - x > 0.05]
+
+
+def seg_len(sg):
+    """Length on the edited timeline: (a, b) plays b-a seconds, (a, b, "rewind", dur) plays dur seconds."""
+    return sg[3] if len(sg) > 2 else sg[1] - sg[0]
+
+
+def build_edit(src, off, segs, out_file):
+    """Concatenate source pieces (source seconds; the file starts at `off`) into one high-quality intermediate.
+    Tiny audio fades at every cut so jump cuts do not click.
+    A piece (a, b, "rewind", dur) plays a..b backwards, sped up to last `dur` seconds, with the reversed audio
+    as a rewind sound: the "it restarts" signal between the tease and the clip."""
+    from common import ffprobe
+    vs = [x for x in ffprobe(src)["streams"] if x.get("codec_type") == "video"][0]
+    num, den = (vs.get("r_frame_rate") or "30/1").split("/")
+    fps = min(60.0, float(num) / max(1.0, float(den)))
+    seek = max(0.0, min(sg[0] for sg in segs) - off - 1.0)
+    parts, labels = [], []
+    norm = "format=yuv420p,setsar=1"
+    for i, sg in enumerate(segs):
+        a, b = sg[0], sg[1]
+        la, lb = a - off - seek, b - off - seek
+        if len(sg) > 2:  # rewind
+            dur = sg[3]
+            n = max(8, int(round(dur * fps)))
+            speed = (lb - la) / dur
+            k = max(0, int(math.floor(math.log10(max(speed, 1.0)))))          # atempo: chain x10 steps, then the rest
+            tempo = ",".join(["atempo=10"] * k + [f"atempo={max(0.5, speed / 10 ** k):.4f}"])
+            parts.append(f"[0:v]trim=start={la:.3f}:end={lb:.3f},setpts=PTS-STARTPTS,fps={n / (lb - la):.4f},reverse,"
+                         f"settb=AVTB,setpts=N/({fps:.3f}*TB),fps={fps:.3f},trim=end_frame={n},eq=saturation=0.75:contrast=1.08,{norm}[v{i}];"
+                         f"[0:a]atrim=start={la:.3f}:end={lb:.3f},asetpts=PTS-STARTPTS,areverse,{tempo},"
+                         f"apad,atrim=end={dur:.3f},volume=0.55,afade=t=in:d=0.03,afade=t=out:st={max(0.0, dur - 0.06):.3f}:d=0.06[a{i}]")
+        else:
+            dur = lb - la
+            parts.append(f"[0:v]trim=start={la:.3f}:end={lb:.3f},setpts=PTS-STARTPTS,{norm}[v{i}];"
+                         f"[0:a]atrim=start={la:.3f}:end={lb:.3f},asetpts=PTS-STARTPTS,"
+                         f"afade=t=in:d=0.012,afade=t=out:st={max(0.0, dur - 0.015):.3f}:d=0.015[a{i}]")
+        labels.append(f"[v{i}][a{i}]")
+    fc = ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(segs)}:v=1:a=1[v][a]"
+    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src), "-filter_complex", fc,
+         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "10", "-pix_fmt", "yuv420p",
+         "-c:a", "pcm_s16le", str(out_file)])
+    return float(ffprobe(out_file)["format"]["duration"])
+
+
+def remap_words(words, segs):
+    """Words (source seconds) -> times on the edited timeline; words in cut-out pauses are dropped."""
+    out, o = [], 0.0
+    for sg in segs:
+        a, b = sg[0], sg[1]
+        if len(sg) == 2:  # no captions over the rewind
+            for w in words:
+                if a - 0.05 <= w["s"] < b:
+                    out.append(dict(w, s=round(max(0.0, w["s"] - a) + o, 3), e=round(min(w["e"], b) - a + o, 3)))
+        o += seg_len(sg)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job"); ap.add_argument("--pick", type=int, default=1)
-    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react"], default="blur")
+    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react", "split"], default="blur")
+    ap.add_argument("--force", action="store_true", help="react: skip the 'is there gameplay outside the cam' check")
+    ap.add_argument("--set", default="candidates", help="candidates (shorts) or candidates_long (pipeline.py)")
+    ap.add_argument("--filler", default="random", help="split: video path, name in fillers/ (gta_ramp, subway_vertical...) or random")
+    ap.add_argument("--split", type=float, default=0.5, help="split: share of the height for the content")
+    ap.add_argument("--name", help="output file name without extension (default clip_<pick> / long_<pick>)")
     ap.add_argument("--title", default="", help="reaction title, e.g. 'Speed REALIZED why GTA 6 took 13 YEARS'")
     ap.add_argument("--title-style", choices=["box", "outline"], default="box")
     ap.add_argument("--title-secs", type=float, default=0, help="0 = whole clip")
@@ -208,35 +414,123 @@ def main():
     ap.add_argument("--allow-profanity", action="store_true", help="keep swear words in captions (slurs are always masked)")
     ap.add_argument("--cam", default="auto", help="auto (find the webcam) or x:y:w:h fractions")
     ap.add_argument("--start", type=float); ap.add_argument("--end", type=float)
+    ap.add_argument("--tease", help="S:E source seconds to play first (default: the pick's tease)")
+    ap.add_argument("--no-tease", action="store_true")
+    ap.add_argument("--transition", choices=["rewind", "flash", "cut"], default="rewind",
+                    help="between the tease and the clip: rewind (fast reverse + rewind sound), white flash, or a hard cut")
+    ap.add_argument("--after-tease", type=float, default=0.8,
+                    help="when the tease is inside the clip, end this many seconds after it (the clip builds up to the hook)")
+    ap.add_argument("--keep-after-tease", action="store_true", help="keep playing after the tease moment")
+    ap.add_argument("--tighten", type=float, default=0.45, help="cut speech pauses longer than this (s); 0 = keep pauses")
+    ap.add_argument("--keep", action="append", default=[], metavar="S:E",
+                    help="source seconds never cut as a pause (a silent visual moment); repeatable")
+    ap.add_argument("--drop", action="append", default=[], metavar="S:E",
+                    help="source seconds to cut out (a repeated line, a chat read); repeatable")
+    ap.add_argument("--no-trim", action="store_true", help="keep the exact start/end instead of snapping to the speech")
+    ap.add_argument("--no-punch", action="store_true", help="no zoom-in on the first frames")
+    ap.add_argument("--fps", default="auto", help="output frame rate: auto (source, max 60) or a number")
+    ap.add_argument("--fast-words", action="store_true", help="use the pipeline transcript instead of re-transcribing + aligning")
     a = ap.parse_args()
-    d = Path(a.job); c = load_json(d / "candidates.json")
+    d = Path(a.job); c = load_json(d / f"{a.set}.json")
     pick = next(x for x in c["candidates"] if x["n"] == a.pick)
     s0 = a.start if a.start is not None else pick["start"]; e0 = a.end if a.end is not None else pick["end"]
-    words = load_json(d / "transcript.json")
+    # pipeline.py long sources: only a section around each pick is downloaded (file + offset in the source)
+    SRC = pick.get("file") or c["source"]; OFF = pick.get("offset", 0) if pick.get("file") else 0
+    if s0 - OFF < -0.05:
+        sys.exit(f"start {s0} is before the downloaded section ({OFF}s)")
+    base = a.name or (f"long_{a.pick}" if a.set != "candidates" else f"clip_{a.pick}")
     out = d / "edits"; out.mkdir(exist_ok=True)
+    info = c.get("info", {})
+    from common import ffprobe
+    sdur = float(ffprobe(SRC)["format"]["duration"])
+
+    # ---- tease: a 1-3 s moment (usually the payoff line) shown before the clip
+    tease = None
+    if not a.no_tease:
+        t = a.tease or pick.get("tease")
+        if isinstance(t, str):
+            t = [float(v) for v in t.split(":")]
+        if t:
+            t = (float(t[0]), float(t[1]))
+            if t[0] - OFF < -0.05 or t[1] - OFF > sdur + 0.05 or not 0.4 <= t[1] - t[0] <= 4:
+                sys.exit(f"tease {t} must be 0.4-4 s inside the downloaded video ({OFF:.1f}-{OFF + sdur:.1f} s)")
+            if t[1] - t[0] > 2.5:
+                print(f"note: tease is {t[1] - t[0]:.1f}s; 1-2 s hooks hit harder")
+            tease = t
+
+    # ---- words: re-transcribed + force-aligned for this clip (cached), or the pipeline transcript
+    pipe_words = load_json(d / "transcript.json") if (d / "transcript.json").exists() else []
+    if a.fast_words:
+        words = pipe_words
+    else:
+        from align import clip_words
+        speaker = info.get("channel") or info.get("uploader") or ""
+        wsrc = SRC if OFF == 0 else None
+        words = clip_words(d, s0, e0, src=wsrc, fallback=pipe_words, speaker=speaker)
+        if tease and not (s0 <= tease[0] and tease[1] <= e0):
+            words = sorted(words + clip_words(d, *tease, src=wsrc, fallback=pipe_words, speaker=speaker), key=lambda w: w["s"])
+
+    # ---- edit list: trim to the speech, cut dead air, tease first
+    # The tease is the culminating moment: shown first, then the clip restarts and builds up to it, ending right after.
+    if tease and s0 <= tease[0] < e0 and not a.keep_after_tease:
+        e0 = min(e0, tease[1] + a.after_tease)
+        nxt = next((w["s"] for w in words if w["s"] > tease[1] + 0.1), None)   # never start the next sentence
+        if nxt is not None and nxt < e0:
+            e0 = max(tease[1] + 0.3, nxt - 0.05)
+    elif tease and not s0 <= tease[0] < e0:
+        print(f"note: the tease ({tease[0]:.1f}s) is outside the clip ({s0:.1f}-{e0:.1f}s), so the clip will not build up to it")
+    db = loudness(d, s0, e0 + 1.6, SRC if OFF == 0 else None)
+    keeps = [tuple(float(v) for v in k.split(":")) for k in a.keep]
+    segs = keep_intervals(words, s0, e0, trim=not a.no_trim, tighten=a.tighten, db=db, db_start=s0, keep=keeps)
+    for da, db_ in [tuple(float(v) for v in k.split(":")) for k in a.drop]:   # cut a repeated line / dead bit
+        segs = [p for x, y in segs for p in ((x, min(y, da)), (max(x, db_), y)) if p[1] - p[0] > 0.05]
+    if tease and not a.keep_after_tease and s0 <= tease[0] < e0:   # trimming must not cut the payoff short
+        segs[-1] = (segs[-1][0], max(segs[-1][1], min(e0, tease[1] + 0.3)))
+    flashes = []
+    if tease:
+        lead = [tease]
+        if a.transition == "rewind":   # play the clip so far backwards, fast: "here is how we got there"
+            rw = (segs[0][0], min(tease[1], segs[-1][1]), "rewind", 0.6)
+            lead.append(rw)
+            flashes = [(tease[1] - tease[0], 0.05)]
+        elif a.transition == "flash":
+            flashes = [(tease[1] - tease[0], 0.07)]
+        segs = lead + segs
+    kept = sum(seg_len(sg) for sg in segs)
+    print(f"edit: {len(segs)} piece(s), {e0 - s0:.1f}s -> {kept:.1f}s" + (f", tease {tease[0]:.1f}-{tease[1]:.1f}" if tease else "")
+          + (f" + {a.transition}" if tease else ""))
+    if len(segs) == 1:
+        s0, e0 = segs[0]
+        L0, L1 = max(0.0, s0 - OFF), e0 - OFF
+    else:
+        inter = out / f".{base}.edit.mkv"
+        total = build_edit(SRC, OFF, segs, inter)
+        words = remap_words(words, segs)
+        SRC, OFF, s0, e0, L0, L1 = str(inter), 0.0, 0.0, total, 0.0, total
     layout, cam, side = a.layout, a.cam, 'right'
     face_expr = None
     if layout in ('react', 'facecam') and cam == 'auto':
         from facecam import find_cam
-        r = find_cam(c['source'], s0, e0)
+        r = find_cam(SRC, L0, L1)
         if layout == 'react' and r.get('mode') not in ('cam', 'face'):
             sys.exit(f"skipped: no streamer face over gameplay in this moment ({r.get('mode')}: {r.get('reason', '')}). "
                      "React clips need the game on screen with the cam as a separate box. Pick another moment or stream.")
         if layout == 'react':
             from facecam import has_gameplay, face_crop_expr
-            if not has_gameplay(c['source'], s0, e0, r['box']):
+            if not a.force and not has_gameplay(SRC, L0, L1, r['box']):
                 sys.exit("skipped: the area outside the webcam is not gameplay (same scene or no game on screen). "
                          "Pick a moment where GTA 6 is on screen.")
             if r.get('mode') == 'face' and r.get('face_track'):
                 from common import ffprobe as _fp
-                _vs = [x for x in _fp(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
+                _vs = [x for x in _fp(SRC)['streams'] if x.get('codec_type') == 'video'][0]
                 from facecam import inner_edges
                 sw_, sh_ = int(_vs['width']), int(_vs['height'])
-                bnd = inner_edges(c['source'], s0, e0, r['face'], sw_, sh_)
+                bnd = inner_edges(SRC, L0, L1, r['face'], sw_, sh_)
                 print(f'facecam: cam borders L{bnd[0]} T{bnd[1]} R{bnd[2]} B{bnd[3]} px')
                 fe = face_crop_expr(r['face_track'], sw_, sh_, W, TOP, bounds=bnd)
                 face_expr = (fe['w'], fe['h'], fe['x'], fe['y'])
-                print(f"facecam: no clean cam frame, tracking the face ({r.get('summary', '')})")
+                print(f"facecam: no clean cam frame, still crop around the face, {len(fe['shots'])} shot(s) "
+                      f"cut at {[round(sh[0], 1) for sh in fe['shots'][1:]]} s ({r.get('summary', '')})")
         if r.get('mode') in ('cam', 'face'):
             bx = list(r['box'])
             if r['mode'] == 'face':  # no webcam frame: widen the face crop so it is not a blurry close-up
@@ -256,31 +550,58 @@ def main():
     if a.title and layout == 'react':
         n = len(wrap(a.title, 26 if a.title_style == 'box' else 24))
         if a.title_style == 'box':
-            bh = n * 78 + 44
-            band = (TOP - bh // 2, bh, a.title_secs)
             title = ('box', a.title, TOP, a.title_secs)
         else:
             title = ('outline', a.title, TOP + 40, a.title_secs)
-    ass = out / f"clip_{a.pick}.ass"
+    if a.title and layout == 'split':
+        title = ('outline', a.title, 70, a.title_secs)
+    ass = out / f"{base}.ass"
     caps = a.captions
     cap_words = words if caps != 'none' else []
-    ass.write_text(build_ass(cap_words, s0, e0, a.hook, cap_y, title=title, caps=caps, profanity=a.allow_profanity), encoding="utf-8")
+    clears = [tease[1] - tease[0]] if tease else []
+    ass.write_text(build_ass(cap_words, s0, e0, a.hook, cap_y, title=title, caps=caps, profanity=a.allow_profanity,
+                             clear_at=clears), encoding="utf-8")
     src = None; gx = None
     if layout == 'react':
         from common import ffprobe
-        vs = [x for x in ffprobe(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
+        vs = [x for x in ffprobe(SRC)['streams'] if x.get('codec_type') == 'video'][0]
         src = (int(vs['width']), int(vs['height']))
-        gx = game_offset(c['source'], s0, e0, src, [float(t) for t in cam.split(':')])
-    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr)
-    mp4 = out / f"clip_{a.pick}.mp4"
-    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{s0:.2f}", "-to", f"{e0:.2f}", "-i", c["source"],
-         "-filter_complex", v, "-map", "[vo]", "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
-         "-ar", "48000", "-movflags", "+faststart", str(mp4)])
-    info = c.get("info", {})
-    save_json(out / f"clip_{a.pick}.json", {"file": str(mp4), "start": s0, "end": e0, "layout": layout, "hook": a.hook or a.title, "title": a.title, "cam": cam,
-                                            "source_url": info.get("webpage_url"), "source_title": info.get("title"),
-                                            "source_channel": info.get("channel") or info.get("uploader")})
+        gx = game_offset(SRC, L0, L1, src, [float(t) for t in cam.split(':')])
+    if a.fps == "auto":
+        vs0 = [x for x in ffprobe(SRC)['streams'] if x.get('codec_type') == 'video'][0]
+        num, den = (vs0.get('r_frame_rate') or '30/1').split('/')
+        fps = min(60, max(24, round(float(num) / max(1.0, float(den)))))
+    else:
+        fps = int(float(a.fps))
+    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr, split=a.split,
+                     fps=fps, punch=0 if a.no_punch else 0.10, flashes=flashes)
+    mp4 = out / f"{base}.mp4"
+    extra, filler = [], None
+    if layout == "split":
+        import random
+        from common import ROOT
+        fdir = ROOT / "fillers"
+        if a.filler == "random":
+            filler = random.choice(sorted(fdir.glob("*.mp4")))
+        else:
+            filler = Path(a.filler) if Path(a.filler).exists() else fdir / f"{a.filler}.mp4"
+        from common import ffprobe as _probe
+        fd = float(_probe(filler)["format"]["duration"])
+        fs = random.uniform(0, max(0.0, fd - (e0 - s0) - 1))
+        extra = ["-stream_loop", "-1", "-ss", f"{fs:.2f}", "-i", str(filler)]
+    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{L0:.2f}", "-to", f"{L1:.2f}", "-i", SRC, *extra,
+         "-t", f"{e0 - s0:.2f}", "-filter_complex", v, "-map", "[vo]", "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+         # high quality on purpose: every platform re-compresses the upload, a clean master survives that better
+         "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-maxrate", "16M", "-bufsize", "32M",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(mp4)])
+    if SRC.endswith(".edit.mkv"):
+        Path(SRC).unlink(missing_ok=True)
+    main_segs = [sg for sg in segs if len(sg) == 2][1 if tease else 0:]
+    save_json(out / f"{base}.json", {"file": str(mp4), "start": main_segs[0][0], "end": main_segs[-1][1], "segments": segs,
+                                     "tease": tease, "fps": fps, "layout": layout, "filler": filler and filler.name,
+                                     "hook": a.hook or a.title, "title": a.title, "cam": cam,
+                                     "source_url": info.get("webpage_url"), "source_title": info.get("title"),
+                                     "source_channel": info.get("channel") or info.get("uploader")})
     print(mp4)
 
 
