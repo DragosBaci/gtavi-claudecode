@@ -89,6 +89,13 @@ python scripts/live.py "https://www.youtube.com/watch?v=<live>" --minutes 60
 python scripts/editor.py        # then open http://127.0.0.1:8766
 ```
 
+The editor UI is a Next.js app in `web/` (React, TypeScript). Build it once and `editor.py` serves it:
+
+```
+cd web && npm install && npm run build      # static export in web/out, served by editor.py
+npm run dev                                  # development: http://localhost:3000, proxies /api, /media, /fonts to editor.py
+```
+
 ### Clip editor
 
 `scripts/editor.py` opens a browser editor for the clips `cut.py` made (run it from the folder that holds `jobs/`):

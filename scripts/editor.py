@@ -17,7 +17,7 @@ sys.path.insert(0, str(HERE))
 from common import ROOT, ffprobe, load_json, tool  # noqa: E402
 
 JOBS = (ROOT / "jobs").resolve()
-PAGE = HERE.parent / "editor" / "index.html"
+WEB = (HERE.parent / "web" / "out").resolve()   # the Next.js editor UI, built with `npm run build` in tool/web
 FONTS = (HERE.parent / "fonts").resolve()
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}$")
 TRANSITION_NAMES = ("zoom", "whip", "slide", "fade", "pixel", "circle", "dissolve", "flash", "cut", "rewind")
@@ -451,14 +451,29 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+    def send_ui(self, path):
+        """The Next.js editor (static export in tool/web/out)."""
+        if not (WEB / "index.html").exists():
+            b = (b"<!doctype html><meta charset=utf-8><title>Clip editor</title><body style='font:15px system-ui;padding:40px'>"
+                 b"<h2>The editor UI is not built yet</h2><p>Run <code>npm install &amp;&amp; npm run build</code> in <code>tool/web</code>, "
+                 b"then reload. For development: <code>npm run dev</code> there and open http://localhost:3000 (this server stays the API).</p>")
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b); return
+        rel = path.lstrip("/") or "index.html"
+        p = (WEB / rel).resolve()
+        if p.is_dir():
+            p = p / "index.html"
+        elif not p.exists() and (WEB / (rel + ".html")).exists():
+            p = WEB / (rel + ".html")
+        if WEB not in p.parents and p != WEB or not p.is_file():
+            return self.send_error(404)
+        return self.send_file(p)
+
     def do_GET(self):
         u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
-            if u.path in ("/", "/index.html"):
-                b = PAGE.read_bytes()
-                self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(b)))
-                self.end_headers(); self.wfile.write(b); return
+            if not u.path.startswith(("/api/", "/media/", "/fonts/")):
+                return self.send_ui(u.path)
             if u.path.startswith("/media/"):
                 p = (JOBS / u.path[len("/media/"):]).resolve()
                 if JOBS not in p.parents or not p.is_file():
