@@ -436,6 +436,7 @@ def main():
     s0 = a.start if a.start is not None else pick["start"]; e0 = a.end if a.end is not None else pick["end"]
     # pipeline.py long sources: only a section around each pick is downloaded (file + offset in the source)
     SRC = pick.get("file") or c["source"]; OFF = pick.get("offset", 0) if pick.get("file") else 0
+    SRC0, OFF0 = SRC, OFF   # the downloaded video, kept for the metadata (the editor reopens it)
     if s0 - OFF < -0.05:
         sys.exit(f"start {s0} is before the downloaded section ({OFF}s)")
     base = a.name or (f"long_{a.pick}" if a.set != "candidates" else f"clip_{a.pick}")
@@ -601,7 +602,9 @@ def main():
                                      "tease": tease, "fps": fps, "layout": layout, "filler": filler and filler.name,
                                      "hook": a.hook or a.title, "title": a.title, "cam": cam,
                                      "source_url": info.get("webpage_url"), "source_title": info.get("title"),
-                                     "source_channel": info.get("channel") or info.get("uploader")})
+                                     "source_channel": info.get("channel") or info.get("uploader"),
+                                     # everything needed to reopen and re-render this clip in the editor
+                                     "args": vars(a), "video": str(SRC0), "video_offset": OFF0, "game_x": gx})
     print(mp4)
 
 

@@ -86,7 +86,20 @@ python scripts/moments.py "https://www.youtube.com/watch?v=..." --top 8
 python scripts/cut.py jobs/<id> --pick 2 --layout facecam --hook "Nobody noticed this"
 python scripts/check.py jobs/<id>/edits/clip_2.mp4 --campaign campaigns.md
 python scripts/live.py "https://www.youtube.com/watch?v=<live>" --minutes 60
+python scripts/editor.py        # then open http://127.0.0.1:8766
 ```
+
+### Clip editor
+
+`scripts/editor.py` opens a browser editor for the clips `cut.py` made (run it from the folder that holds `jobs/`):
+
+- **Transcript**: drag across words, then Cut (Delete), Restore, Set as hook (H), Start/End here ([ ]), or Keep silent (K) for a silent visual moment.
+- **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the rewind, then the clip with your cuts and the pauses trimmed the way the render trims them.
+- **Crop webcam**: drag and resize the webcam box on the source frame (Custom, Panel, Original, 9:16, 1:1, 16:9, 4:3), or leave it on auto-detect.
+- **Timeline**: thumbnails, the clip window and hook with draggable edges, cuts, kept parts, trimmed pauses and the pieces of the last render. Shift-drag selects a range. ⌘Z undoes.
+- **Render** runs `cut.py` with these settings and shows its log; the *Rendered* view plays the file, synced with the timeline and transcript.
+
+Every render saves its options in the clip's `.json`, so the editor reopens a clip exactly as it was made.
 
 Windows, macOS or Linux, Python 3.10+. An NVIDIA GPU makes transcription faster; on the CPU a 12-minute video takes about 5 minutes.
 
