@@ -20,6 +20,7 @@ JOBS = (ROOT / "jobs").resolve()
 PAGE = HERE.parent / "editor" / "index.html"
 FONTS = (HERE.parent / "fonts").resolve()
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}$")
+TRANSITION_NAMES = ("zoom", "whip", "slide", "fade", "pixel", "circle", "dissolve", "flash", "cut", "rewind")
 RENDERS = {}           # id -> {"proc", "log", "job", "name", "started"}
 LOCK = threading.Lock()
 _probe_cache = {}
@@ -146,6 +147,7 @@ def project(job, name=None, set_=None, pick=None):
             if mp4.exists():
                 rendered = {"url": rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}", "segments": meta.get("segments"),
                             "tease": meta.get("tease"), "dur": probe(mp4)["dur"], "fps": meta.get("fps"),
+                            "transition": meta.get("transition") or {"name": "rewind" if meta.get("tease") else None, "overlap": 0},
                             "updated": mp4.stat().st_mtime}
     if meta:
         video, off, set_, pick = find_video(d, meta)
@@ -181,7 +183,7 @@ def project(job, name=None, set_=None, pick=None):
         "layout": meta.get("layout") or args.get("layout") or "react",
         "title": meta.get("title") if meta else p.get("title", ""),
         "title_style": args.get("title_style", "box"), "captions": args.get("captions", "word"),
-        "transition": args.get("transition", "rewind"), "tighten": args.get("tighten", 0.45),
+        "transition": args.get("transition", "zoom"), "tighten": args.get("tighten", 0.45),
         "keep_after_tease": bool(args.get("keep_after_tease")),
         "punch": not args.get("no_punch", False), "trim": not args.get("no_trim", False),
     }
@@ -239,7 +241,7 @@ def render(body):
            "--start", f"{num(s['start']):.3f}", "--end", f"{num(s['end']):.3f}",
            "--title", str(s.get("title", ""))[:120], "--title-style", "outline" if s.get("title_style") == "outline" else "box",
            "--captions", s["captions"] if s.get("captions") in ("word", "bubble", "none") else "word",
-           "--transition", s["transition"] if s.get("transition") in ("rewind", "flash", "cut") else "rewind",
+           "--transition", s["transition"] if s.get("transition") in TRANSITION_NAMES else "zoom",
            "--tighten", f"{num(s.get('tighten', 0.45), 0, 5):.2f}"]
     if s.get("tease"):
         a, b = num(s["tease"][0]), num(s["tease"][1])

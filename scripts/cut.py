@@ -346,6 +346,18 @@ def seg_len(sg):
     return sg[3] if len(sg) > 2 else sg[1] - sg[0]
 
 
+# hook -> clip transitions blended with ffmpeg xfade: name -> (xfade transition, seconds, whoosh sound)
+TRANSITIONS = {
+    "zoom": ("zoomin", 0.35, True),        # zooms into the clip
+    "whip": ("hblur", 0.30, True),         # motion-blur swipe
+    "slide": ("slideup", 0.30, True),      # the clip pushes up from below
+    "fade": ("fadeblack", 0.45, False),    # quick dip to black
+    "pixel": ("pixelize", 0.40, True),     # pixelates through
+    "circle": ("circleopen", 0.40, False), # circle opens onto the clip
+    "dissolve": ("dissolve", 0.35, False), # grainy dissolve
+}
+
+
 def build_edit(src, off, segs, out_file):
     """Concatenate source pieces (source seconds; the file starts at `off`) into one high-quality intermediate.
     Tiny audio fades at every cut so jump cuts do not click.
@@ -416,8 +428,10 @@ def main():
     ap.add_argument("--start", type=float); ap.add_argument("--end", type=float)
     ap.add_argument("--tease", help="S:E source seconds to play first (default: the pick's tease)")
     ap.add_argument("--no-tease", action="store_true")
-    ap.add_argument("--transition", choices=["rewind", "flash", "cut"], default="rewind",
-                    help="between the tease and the clip: rewind (fast reverse + rewind sound), white flash, or a hard cut")
+    ap.add_argument("--transition", choices=[*TRANSITIONS, "rewind", "flash", "cut"], default="zoom",
+                    help="between the hook and the clip: " + ", ".join(TRANSITIONS) +
+                         " (blended, with a whoosh on zoom/whip/slide/pixel), rewind (fast reverse + rewind sound), "
+                         "flash (white flash) or cut (hard cut)")
     ap.add_argument("--after-tease", type=float, default=0.8,
                     help="when the tease is inside the clip, end this many seconds after it (the clip builds up to the hook)")
     ap.add_argument("--keep-after-tease", action="store_true", help="keep playing after the tease moment")
@@ -497,7 +511,12 @@ def main():
         elif a.transition == "flash":
             flashes = [(tease[1] - tease[0], 0.07)]
         segs = lead + segs
-    kept = sum(seg_len(sg) for sg in segs)
+    xf = None   # blended transition: never longer than half the hook or half the clip
+    if tease and a.transition in TRANSITIONS and len(segs) > 1:
+        kind, d, whoosh = TRANSITIONS[a.transition]
+        d = round(min(d, seg_len(segs[0]) * 0.5, sum(seg_len(sg) for sg in segs[1:]) * 0.5), 3)
+        xf = (kind, d, whoosh)
+    kept = sum(seg_len(sg) for sg in segs) - (xf[1] if xf else 0)
     print(f"edit: {len(segs)} piece(s), {e0 - s0:.1f}s -> {kept:.1f}s" + (f", tease {tease[0]:.1f}-{tease[1]:.1f}" if tease else "")
           + (f" + {a.transition}" if tease else ""))
     if len(segs) == 1:
@@ -506,7 +525,7 @@ def main():
     else:
         inter = out / f".{base}.edit.mkv"
         total = build_edit(SRC, OFF, segs, inter)
-        words = remap_words(words, segs)
+        words = remap_words(words, segs)   # captions are burned before the blend, on the un-overlapped timeline
         SRC, OFF, s0, e0, L0, L1 = str(inter), 0.0, 0.0, total, 0.0, total
     layout, cam, side = a.layout, a.cam, 'right'
     face_expr = None
@@ -559,7 +578,7 @@ def main():
     ass = out / f"{base}.ass"
     caps = a.captions
     cap_words = words if caps != 'none' else []
-    clears = [tease[1] - tease[0]] if tease else []
+    clears = [tease[1] - tease[0] - (xf[1] if xf else 0)] if tease else []   # hook captions end when the transition starts
     ass.write_text(build_ass(cap_words, s0, e0, a.hook, cap_y, title=title, caps=caps, profanity=a.allow_profanity,
                              clear_at=clears), encoding="utf-8")
     src = None; gx = None
@@ -590,8 +609,27 @@ def main():
         fd = float(_probe(filler)["format"]["duration"])
         fs = random.uniform(0, max(0.0, fd - (e0 - s0) - 1))
         extra = ["-stream_loop", "-1", "-ss", f"{fs:.2f}", "-i", str(filler)]
+    LOUD = "loudnorm=I=-14:TP=-1.5:LRA=11"
+    amap, aopt = ["-map", "0:a?"], ["-af", LOUD]
+    if xf:   # blend the finished hook into the finished clip (after the layout, so panels never mix)
+        kind, d, whoosh = xf
+        t0 = seg_len(segs[0])
+        st = "aformat=sample_rates=48000:channel_layouts=stereo"
+        v = (v[:v.rindex("[vo]")] + "[vfull];" +
+             f"[vfull]split[x1][x2];[x1]trim=end={t0:.3f},setpts=PTS-STARTPTS,fps={fps},settb=AVTB[xh];"
+             f"[x2]trim=start={t0:.3f},setpts=PTS-STARTPTS,fps={fps},settb=AVTB[xr];"
+             f"[xh][xr]xfade=transition={kind}:duration={d:.3f}:offset={t0 - d:.3f},format=yuv420p[vo];"
+             f"[0:a]asplit[a1][a2];[a1]atrim=end={t0:.3f},asetpts=PTS-STARTPTS,{st}[ah];"
+             f"[a2]atrim=start={t0:.3f},asetpts=PTS-STARTPTS,{st}[ar];[ah][ar]acrossfade=d={d:.3f}:c1=tri:c2=tri[ax]")
+        if whoosh:   # short filtered-noise whoosh peaking at the transition
+            wd, ws = d + 0.3, max(0.0, t0 - d - 0.15)
+            v += (f";anoisesrc=d={wd:.3f}:c=pink:a=0.6:r=48000,highpass=f=500,lowpass=f=4500,{st},"
+                  f"afade=t=in:d={wd * 0.55:.3f}:curve=exp,afade=t=out:st={wd * 0.55:.3f}:d={wd * 0.45:.3f},volume=0.28,"
+                  f"adelay={int(ws * 1000)}:all=1[wh];[ax][wh]amix=inputs=2:duration=first:normalize=0[am]")
+        v += f";[{'am' if whoosh else 'ax'}]{LOUD}[ao]"
+        amap, aopt = ["-map", "[ao]"], []
     run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{L0:.2f}", "-to", f"{L1:.2f}", "-i", SRC, *extra,
-         "-t", f"{e0 - s0:.2f}", "-filter_complex", v, "-map", "[vo]", "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+         "-t", f"{e0 - s0:.2f}", "-filter_complex", v, "-map", "[vo]", *amap, *aopt,
          # high quality on purpose: every platform re-compresses the upload, a clean master survives that better
          "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-maxrate", "16M", "-bufsize", "32M",
          "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(mp4)])
@@ -599,7 +637,8 @@ def main():
         Path(SRC).unlink(missing_ok=True)
     main_segs = [sg for sg in segs if len(sg) == 2][1 if tease else 0:]
     save_json(out / f"{base}.json", {"file": str(mp4), "start": main_segs[0][0], "end": main_segs[-1][1], "segments": segs,
-                                     "tease": tease, "fps": fps, "layout": layout, "filler": filler and filler.name,
+                                     "tease": tease, "fps": fps,
+                                     "transition": {"name": a.transition if tease else None, "overlap": xf[1] if xf else 0.0}, "layout": layout, "filler": filler and filler.name,
                                      "hook": a.hook or a.title, "title": a.title, "cam": cam,
                                      "source_url": info.get("webpage_url"), "source_title": info.get("title"),
                                      "source_channel": info.get("channel") or info.get("uploader"),

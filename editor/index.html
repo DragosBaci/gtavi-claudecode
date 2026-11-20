@@ -182,6 +182,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;border:1px solid var(--line2);border-
           <button data-mode="free" title="Plays straight through from the playhead">Source</button>
           <button data-mode="rendered" title="The last rendered file">Rendered</button>
         </div>
+        <button class="btn small" id="hookBtn" title="Play the hook first, or not (Shift+H)">⚡ Hook first: <b>on</b></button>
         <button class="btn small" id="cropBtn">⛶ Crop webcam</button>
       </div>
       <div id="stage">
@@ -246,6 +247,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;border:1px solid var(--line2);border-
 </div>
 <div class="toast" id="toast"></div>
 <video id="v" playsinline preload="auto" style="display:none"></video>
+<video id="v2" playsinline preload="auto" muted style="display:none"></video>
 
 <script>
 "use strict";
@@ -264,7 +266,18 @@ const fmt = t => { t = Math.max(0, t); const m = Math.floor(t / 60); return `${m
 let P = null, S = null, units = [], groups = [], stripImg = null, stripInfo = null;
 let mode = "edit", playing = false, pl = [], pi = 0, rewindUntil = 0, flashUntil = 0, pendingSeek = null;
 let sel = null, tab = "layout", undo = [], renderId = null, renderPoll = null, cropTmp = null;
-const v = $("#v"), cv = $("#cv"), ctx = cv.getContext("2d"), rv = $("#rv");
+const v = $("#v"), v2 = $("#v2"), cv = $("#cv"), rv = $("#rv");
+let ctx = cv.getContext("2d");
+// hook -> clip transitions (same names and lengths as cut.py TRANSITIONS); blended ones overlap hook and clip
+const BLEND = { zoom: 0.35, whip: 0.30, slide: 0.30, fade: 0.45, pixel: 0.40, circle: 0.40, dissolve: 0.35 };
+const WHOOSH = new Set(["zoom", "whip", "slide", "pixel"]);
+const TRANS_LIST = [["zoom", "Zoom", "Pushes into the clip · whoosh"], ["whip", "Whip", "Motion-blur swipe · whoosh"],
+  ["slide", "Slide up", "The clip pushes up · whoosh"], ["fade", "Dip to black", "Quick fade through black"],
+  ["pixel", "Pixelate", "Pixels out and back · whoosh"], ["circle", "Circle", "A circle opens onto the clip"],
+  ["dissolve", "Dissolve", "Grainy crossfade"], ["flash", "Flash", "White flash, hard cut"],
+  ["cut", "Cut", "Hard cut"], ["rewind", "Rewind", "Plays backwards to the start"]];
+const blendLen = () => S.tease && BLEND[S.transition] ? Math.min(BLEND[S.transition], (S.tease[1] - S.tease[0]) * 0.5) : 0;
+let trans = null, AC = null;
 
 function toast(msg, ms = 1800) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms); }
 async function api(url, body) {
@@ -273,8 +286,8 @@ async function api(url, body) {
 }
 // Rendered view: output time <-> source time through the edit pieces cut.py saved (hook, rewind, clip pieces)
 function rPieces() {
-  let o = 0;
-  return (P?.rendered?.segments || []).map((sg, i) => { const rw = sg.length > 2, len = rw ? +sg[3] : sg[1] - sg[0]; const r = { a: +sg[0], b: +sg[1], rw, o, len, hook: i === 0 && !!P.rendered.tease }; o += len; return r; });
+  let o = 0; const ov = +(P?.rendered?.transition?.overlap || 0);
+  return (P?.rendered?.segments || []).map((sg, i) => { if (i === 1) o -= ov; const rw = sg.length > 2, len = rw ? +sg[3] : sg[1] - sg[0]; const r = { a: +sg[0], b: +sg[1], rw, o, len, hook: i === 0 && !!P.rendered.tease }; o += len; return r; });
 }
 function srcFromOut(t) {
   const ps = rPieces(); const r = ps.find(p => t >= p.o && t < p.o + p.len) || ps[ps.length - 1]; if (!r) return P.video.offset;
@@ -341,7 +354,7 @@ function plan() {
   const m = mainPieces().map(([a, b]) => ({ a, b, kind: "clip" }));
   return S.tease ? [{ a: S.tease[0], b: S.tease[1], kind: "hook" }, ...m] : m;
 }
-function estLen() { const p = plan(); return p.reduce((s, x) => s + x.b - x.a, 0) + (S.tease && S.transition === "rewind" ? 0.6 : 0); }
+function estLen() { const p = plan(); return p.reduce((s, x) => s + x.b - x.a, 0) + (S.tease && S.transition === "rewind" ? 0.6 : 0) - blendLen(); }
 
 // ---------------------------------------------------------------- loading
 async function loadClips(selectFirst) {
@@ -370,7 +383,7 @@ async function openClip(x) {
   } catch (e) {}
   $("#draftBanner").classList.toggle("show", restored);
   $("#srcLine").textContent = `${P.source.channel || ""} · ${P.source.title || ""}`;
-  v.src = P.video.url; v.load();
+  v.src = P.video.url; v.load(); v2.src = P.video.url; v2.load();
   rv.src = P.rendered ? P.rendered.url : ""; if (!P.rendered && mode === "rendered") setMode("edit");
   buildUnits(); buildGroups();
   stripImg = null; stripInfo = null;
@@ -473,10 +486,11 @@ function play() {
     pl = plan(); const t = tNow();
     pi = pl.findIndex(p => t >= p.a - 0.05 && t < p.b - 0.05);
     if (pi < 0) { pi = 0; seek(pl[0].a); }
+    if (pl[pi].kind === "hook" && pl[pi + 1]) v2.currentTime = pl[pi + 1].a - P.video.offset;   // ready for the transition
   }
   playing = true; v.play().catch(() => {}); setPlayIcon();
 }
-function stop() { playing = false; v.pause(); rv.pause(); rewindUntil = 0; setPlayIcon(); }
+function stop() { playing = false; v.pause(); v2.pause(); rv.pause(); rewindUntil = 0; trans = null; v.volume = 1; setPlayIcon(); }
 function setPlayIcon() { $("#playBtn").innerHTML = playing ? `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>` : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg>`; }
 $("#playBtn").onclick = () => (playing ? stop() : play());
 v.addEventListener("ended", stop);
@@ -488,9 +502,18 @@ function tick() {
   if (P && playing && mode === "edit") {
     const now = performance.now();
     if (rewindUntil && now >= rewindUntil) { rewindUntil = 0; v.play().catch(() => {}); }
-    if (!rewindUntil) {
+    if (trans) {   // blended hook -> clip transition running
+      const k = (now - trans.start) / (trans.D * 1000);
+      v.volume = clamp(1 - k, 0, 1);
+      if (k >= 1) { pi++; const nt = v2.currentTime + P.video.offset; trans = null; v2.pause(); v.volume = 1; seek(nt); }
+    } else if (!rewindUntil) {
       const t = tNow(), p = pl[pi];
-      if (p && t >= p.b - 0.015) {
+      const D = p && p.kind === "hook" && pl[pi + 1] && BLEND[S.transition] ? Math.min(BLEND[S.transition], (p.b - p.a) * 0.5) : 0;
+      if (D && t >= p.b - D) {
+        trans = { kind: S.transition, D, start: now };
+        v2.currentTime = pl[pi + 1].a - P.video.offset; v2.play().catch(() => {});
+        if (WHOOSH.has(S.transition)) whoosh(D);
+      } else if (p && t >= p.b - 0.015) {
         pi++;
         if (pi >= pl.length) { stop(); seek(pl[pl.length - 1].b - 0.02); }
         else {
@@ -519,8 +542,16 @@ function cover(img, sx, sy, sw, sh, dx, dy, dw, dh) {
 }
 function drawFrame() {
   if (v.readyState < 2) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height); return; }
-  const sw = P.video.w, sh = P.video.h, L = S.layout, now = performance.now();
-  ctx.save(); ctx.scale(K, K); ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  const now = performance.now();
+  if (trans) return drawTransition(now);
+  ctx.save(); ctx.scale(K, K);
+  drawScene(v, tNow());
+  overlays(now);
+  ctx.restore();
+}
+function drawScene(src, t) {   // the 9:16 picture of `src` at source time t: layout, title, captions (ctx scaled by K)
+  const v = src, sw = P.video.w, sh = P.video.h, L = S.layout;
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
   if (rewindUntil) ctx.filter = "saturate(0.6) contrast(1.08)";
   if (L === "react" || L === "facecam") {
     const ph = L === "react" ? TOP : Math.round(H * 0.38), gh = H - ph;
@@ -539,7 +570,9 @@ function drawFrame() {
     const fh = W * sh / sw; ctx.drawImage(v, 0, 0, sw, sh, 0, (H - fh) / 2 - 80, W, fh);
   }
   ctx.filter = "none";
-  if (!rewindUntil && S.captions !== "none") drawCaption(tNow(), L);
+  if (!rewindUntil && S.captions !== "none") drawCaption(t, L);
+}
+function overlays(now) {
   if (rewindUntil) {
     ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = "#fff"; ctx.font = "900 120px Montserrat"; ctx.textAlign = "center"; ctx.fillText("◀◀", W / 2, H / 2 + 40);
@@ -549,7 +582,39 @@ function drawFrame() {
     const t = tNow(), inClip = plan().some(p => t >= p.a && t <= p.b);
     if (!inClip) { ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, W, H); ctx.fillStyle = "#ddd"; ctx.font = "700 40px -apple-system,sans-serif"; ctx.textAlign = "center"; ctx.fillText("not in the edit", W / 2, 120); }
   }
-  ctx.restore();
+}
+const offA = document.createElement("canvas"), offB = document.createElement("canvas"), offS = document.createElement("canvas");
+offA.width = offB.width = 540; offA.height = offB.height = 960;
+function sceneTo(canvas, src, t) { const keep = ctx; ctx = canvas.getContext("2d"); ctx.save(); ctx.scale(K, K); drawScene(src, t); ctx.restore(); ctx = keep; }
+function drawTransition(now) {   // canvas versions of the xfade transitions cut.py renders
+  const p = clamp((now - trans.start) / (trans.D * 1000), 0, 1), e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+  sceneTo(offA, v, tNow());
+  sceneTo(offB, v2.readyState >= 2 ? v2 : v, v2.currentTime + P.video.offset);
+  const c = ctx, w = cv.width, h = cv.height, mid = 1 - Math.abs(2 * p - 1);
+  c.save(); c.fillStyle = "#000"; c.fillRect(0, 0, w, h);
+  switch (trans.kind) {
+    case "fade": c.drawImage(p < 0.5 ? offA : offB, 0, 0); c.fillStyle = `rgba(0,0,0,${mid})`; c.fillRect(0, 0, w, h); break;
+    case "dissolve": c.drawImage(offA, 0, 0); c.globalAlpha = e; c.drawImage(offB, 0, 0); break;
+    case "zoom": { c.drawImage(offB, 0, 0); c.globalAlpha = 1 - e; const z = 1 + e * 1.2; c.translate(w / 2, h / 2); c.scale(z, z); c.drawImage(offA, -w / 2, -h / 2); break; }
+    case "slide": c.drawImage(offA, 0, -e * h); c.drawImage(offB, 0, (1 - e) * h); break;
+    case "whip": c.filter = `blur(${mid * 16}px)`; c.drawImage(offA, -e * w * 0.25, 0); c.globalAlpha = e; c.drawImage(offB, (1 - e) * w * 0.25, 0); break;
+    case "pixel": { const n = Math.max(1, Math.round(1 + mid * 36)); offS.width = Math.ceil(w / n); offS.height = Math.ceil(h / n);
+      const sc = offS.getContext("2d"); sc.imageSmoothingEnabled = false; sc.drawImage(p < 0.5 ? offA : offB, 0, 0, offS.width, offS.height);
+      c.imageSmoothingEnabled = false; c.drawImage(offS, 0, 0, offS.width, offS.height, 0, 0, w, h); break; }
+    case "circle": c.drawImage(offA, 0, 0); c.beginPath(); c.arc(w / 2, h / 2, e * Math.hypot(w, h) / 2, 0, Math.PI * 2); c.clip(); c.drawImage(offB, 0, 0); break;
+    default: c.drawImage(offB, 0, 0);
+  }
+  c.restore();
+}
+function whoosh(D) {   // filtered noise sweep, like the whoosh cut.py mixes in
+  try {
+    AC = AC || new AudioContext(); const len = D + 0.3, n = Math.floor(AC.sampleRate * len), buf = AC.createBuffer(1, n, AC.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    const src = AC.createBufferSource(); src.buffer = buf; const bp = AC.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 0.8;
+    const t0 = AC.currentTime; bp.frequency.setValueAtTime(600, t0); bp.frequency.exponentialRampToValueAtTime(3800, t0 + len * 0.6);
+    const g = AC.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.3, t0 + len * 0.55); g.gain.exponentialRampToValueAtTime(0.0001, t0 + len);
+    src.connect(bp).connect(g).connect(AC.destination); src.start();
+  } catch (e) {}
 }
 function wrap2(text, font, maxW) {
   ctx.font = font; const words = text.split(/\s+/); if (ctx.measureText(text).width <= maxW) return [text];
@@ -786,6 +851,16 @@ $("#cropClose").onclick = closeCrop;
 $("#cropApply").onclick = () => { const b = cropTmp.map(x => +x.toFixed(4)); closeCrop(); change(() => { S.cam = b.join(":"); }, "Webcam crop set"); };
 $("#cropAuto").onclick = () => { closeCrop(); change(() => { S.cam = "auto"; }, "Webcam: auto-detect at render"); };
 $("#cropBtn").onclick = openCrop; $("#camChip").onclick = openCrop;
+function toggleHook() {
+  if (!P) return; const was = !!S.tease;
+  change(() => {
+    if (S.tease) { S.tease_saved = S.tease; S.tease = null; }
+    else { const t = clamp(tNow(), vMin(), vMax() - 1.5); S.tease = S.tease_saved || P.state.tease || P.state.tease_saved || [+t.toFixed(3), +(t + 1.5).toFixed(3)]; }
+  });
+  stop(); seek(S.tease ? S.tease[0] : S.start);
+  toast(was ? "Hook removed: the clip starts at its beginning" : "Hook on: it plays first");
+}
+$("#hookBtn").onclick = toggleHook;
 
 // ---------------------------------------------------------------- side panel
 function panel() {
@@ -812,7 +887,8 @@ function panel() {
       ${S.tease ? `<div class="field"><label>Hook (source seconds)</label><div class="row"><input type="number" step="0.05" id="pT0" value="${S.tease[0].toFixed(2)}"><input type="number" step="0.05" id="pT1" value="${S.tease[1].toFixed(2)}"></div>
         <div style="margin-top:6px;color:${S.tease[1] - S.tease[0] > 2.5 ? "#ffd36b" : "var(--mute)"};font-size:12.5px">${(S.tease[1] - S.tease[0]).toFixed(1)} s ${S.tease[1] - S.tease[0] > 2.5 ? "· 1–2 s hits harder" : ""}</div>
         <button class="btn small" id="pPlayHook" style="margin-top:8px">▶ Play the hook</button></div>
-      <div class="field"><label>Then</label><div class="seg">${[["rewind", "⏪ Rewind"], ["flash", "Flash"], ["cut", "Cut"]].map(([k, n]) => `<button data-set="transition" data-v="${k}" class="${S.transition === k ? "on" : ""}">${n}</button>`).join("")}</div></div>
+      <div class="field"><label>Transition into the clip</label><div class="cards">${TRANS_LIST.map(([k, n, d]) => `<button class="card ${S.transition === k ? "on" : ""}" data-set="transition" data-v="${k}"><div class="t">${n}</div><div class="d">${d}</div></button>`).join("")}</div>
+        <button class="btn small" id="pPlayTrans" style="margin-top:10px">▶ Preview transition</button></div>
       <div class="field"><label>After the hook moment</label><div class="seg"><button data-set="keep_after_tease" data-v="0" class="${!S.keep_after_tease ? "on" : ""}">End on it</button><button data-set="keep_after_tease" data-v="1" class="${S.keep_after_tease ? "on" : ""}">Keep playing</button></div></div>`
         : `<div class="note">Select the culminating 1–2 s in the transcript (the reveal, the punchline) and press <b>⚡ Set as hook</b>. It plays first, then the clip rewinds and builds up to it.</div>`}`,
     edit: () => `<h3>Edit</h3>
@@ -841,11 +917,16 @@ $("#panel").addEventListener("click", e => {
   if (e.target.id === "pCrop") openCrop();
   if (e.target.id === "pRender") doRender();
   if (e.target.id === "pSeeR") setMode("rendered");
+  if (e.target.id === "pPlayTrans") {
+    setMode("edit"); const full = plan(); if (full.length < 2 || full[0].kind !== "hook") return;
+    pl = [{ a: Math.max(full[0].a, full[0].b - 1.2), b: full[0].b, kind: "hook" }, { a: full[1].a, b: Math.min(full[1].b, full[1].a + 1.6), kind: "clip" }];
+    pi = 0; seek(pl[0].a); v2.currentTime = pl[1].a - P.video.offset; playing = true; v.play().catch(() => {}); setPlayIcon(); return;
+  }
   if (e.target.id === "pPlayHook") { setMode("edit"); seek(S.tease[0]); pl = [{ a: S.tease[0], b: S.tease[1], kind: "clip" }]; pi = 0; playing = true; v.play(); setPlayIcon(); }
 });
 $("#panel").addEventListener("change", e => {
   const id = e.target.id, val = e.target.value;
-  if (id === "pHookOn") change(() => { S.tease = e.target.checked ? (P.state.tease || [clamp(tNow(), vMin(), vMax() - 1.5), clamp(tNow(), vMin(), vMax() - 1.5) + 1.5]) : null; });
+  if (id === "pHookOn") toggleHook();
   if (id === "pT0" || id === "pT1") { const a = +$("#pT0").value, b = +$("#pT1").value; if (b - a >= 0.4 && b - a <= 4) change(() => { S.tease = [a, b]; }); else { toast("Hook must be 0.4–4 s"); panel(); } }
   if (id === "pS" || id === "pE") { const a = +$("#pS").value, b = +$("#pE").value; if (b - a >= 1) change(() => { S.start = clamp(a, vMin(), vMax()); S.end = clamp(b, vMin(), vMax()); }); else panel(); }
   if (id === "pTrim") change(() => { S.trim = e.target.checked; });
@@ -898,9 +979,10 @@ function refresh(light) {
   if (!P) return;
   $("#layoutChip").innerHTML = `Layout: <b>${LAYOUTS[S.layout] || S.layout}</b>`;
   $("#camChip").innerHTML = `Cam: <b>${S.cam === "auto" ? "auto" : "manual"}</b>`;
+  const hb = $("#hookBtn"); hb.innerHTML = `⚡ Hook first: <b>${S.tease ? "on" : "off"}</b>`; hb.style.borderColor = S.tease ? "#6b5a14" : ""; hb.style.color = S.tease ? "var(--yellow)" : "";
   const len = estLen(); const lc = $("#lenChip"); lc.innerHTML = `≈ <b>${len.toFixed(1)} s</b>`; lc.className = "chip " + (len >= 12 && len <= 25 ? "ok" : "warn");
   $("#stageInfo").innerHTML = mode === "rendered" && P.rendered ? `Rendered file · <b>${P.rendered.dur.toFixed(1)} s</b>` :
-    `Live preview · ${S.tease ? `hook <b>${(S.tease[1] - S.tease[0]).toFixed(1)} s</b> → ${S.transition} → ` : ""}clip <b>${(len - (S.tease ? S.tease[1] - S.tease[0] + (S.transition === "rewind" ? .6 : 0) : 0)).toFixed(1)} s</b> · pauses trimmed like the render`;
+    `Live preview · ${S.tease ? `hook <b>${(S.tease[1] - S.tease[0]).toFixed(1)} s</b> → <b>${(TRANS_LIST.find(x => x[0] === S.transition) || [0, S.transition])[1].toLowerCase()}</b> → ` : "no hook · "}total <b>${len.toFixed(1)} s</b> · pauses trimmed like the render`;
   if (!light) { paintWords(); panel(); updSelHint(); }
   drawTL();
 }
@@ -911,6 +993,7 @@ document.addEventListener("keydown", e => {
   if (typing || !P) return;
   if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
   else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); act("cut"); }
+  else if (e.key === "H" && e.shiftKey) toggleHook();
   else if (e.key.toLowerCase() === "h") act("hook");
   else if (e.key.toLowerCase() === "k") act("keep");
   else if (e.key === "[") act("start");

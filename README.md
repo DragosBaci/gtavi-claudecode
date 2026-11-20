@@ -94,7 +94,8 @@ python scripts/editor.py        # then open http://127.0.0.1:8766
 `scripts/editor.py` opens a browser editor for the clips `cut.py` made (run it from the folder that holds `jobs/`):
 
 - **Transcript**: drag across words, then Cut (Delete), Restore, Set as hook (H), Start/End here ([ ]), or Keep silent (K) for a silent visual moment.
-- **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the rewind, then the clip with your cuts and the pauses trimmed the way the render trims them.
+- **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the transition, then the clip with your cuts and the pauses trimmed the way the render trims them.
+- **Hook first: on/off** (Shift+H) next to the preview; switching it back on restores the same hook. The Hook panel picks the transition into the clip: Zoom (default), Whip, Slide up, Dip to black, Pixelate, Circle, Dissolve, Flash, Cut or Rewind, each previewed live.
 - **Crop webcam**: drag and resize the webcam box on the source frame (Custom, Panel, Original, 9:16, 1:1, 16:9, 4:3), or leave it on auto-detect.
 - **Timeline**: thumbnails, the clip window and hook with draggable edges, cuts, kept parts, trimmed pauses and the pieces of the last render. Shift-drag selects a range. ⌘Z undoes.
 - **Render** runs `cut.py` with these settings and shows its log; the *Rendered* view plays the file, synced with the timeline and transcript.
