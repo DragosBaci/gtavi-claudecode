@@ -12,7 +12,7 @@ Finds the questions fans keep asking, checks whether `facts.md` answers them, an
 Run from the page folder (where `facts.md` lives):
 
 ```
-python scripts/questions.py --subs GTA6,GTA,GrandTheftAutoV --days 3 [--comments comments.txt] --out questions.md
+python "${CLAUDE_PLUGIN_ROOT}/scripts/questions.py" --subs GTA6,GTA,GrandTheftAutoV --days 3 [--comments comments.txt] --out questions.md
 ```
 
 - `--comments comments.txt`: comments pasted from our own posts, one per line.
