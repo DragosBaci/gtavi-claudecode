@@ -5,7 +5,11 @@ is, and what was posted recently. Claude returns the posting order with a one-li
 clip on hold (e.g. it needs a re-cut). Saved to queue/order.json; queue/uploader.py orders the queue by it, so the
 Queue page and the auto-uploader both follow it.
 
-usage: python scripts/rerank.py      (from the clip desk folder)
+Rendered clips that aren't in the queue yet (the Queue page's "Not queued") are ranked too: they're added to the queue
+in Claude's order, and the ones not worth posting go on hold (the auto-uploader skips holds). Clips removed from the
+queue on the Queue page (queue/removed.json) stay out. --queued-only ranks just the queue, as before.
+
+usage: python scripts/rerank.py [--queued-only]      (from the clip desk folder)
 """
 import json, os, re, subprocess, sys, time
 from datetime import datetime
@@ -17,6 +21,26 @@ import uploader as U  # noqa: E402
 ROOT, Q = U.ROOT, U.Q
 
 ORDER, STATUS = Q / "order.json", Q / "uploads" / "rerank.json"
+REMOVED = Q / "removed.json"   # ids taken out of the queue on the Queue page: never added back by a re-rank
+NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}$")
+
+
+def not_queued(queued):
+    """Rendered clips (jobs/<job>/edits/<name>.mp4 + .json) that aren't queue items and weren't removed from the queue."""
+    removed = set(U.jload(REMOVED, []))
+    out = []
+    for mp4 in sorted((ROOT / "jobs").glob("*/edits/*.mp4")):
+        job, name = mp4.parent.parent.name, mp4.stem
+        cid = f"{job}/{name}"
+        if job.startswith(".") or name.startswith(".") or not NAME_RE.match(name) or cid in queued or cid in removed:
+            continue
+        if not mp4.with_suffix(".json").exists():
+            continue
+        try:
+            out.append(U.added_item(job, name))
+        except SystemExit:
+            pass
+    return out
 MAIN = ("tiktok", "youtube", "instagram")
 
 
@@ -49,7 +73,9 @@ def main():
     status(state="running", started=time.time(), error=None)
     st, skips = U.jload(U.STATE, {}), U.jload(U.SKIPS, {})
     clips, posted = [], []
-    for it in U.items().values():
+    queue = U.items()
+    new = {} if "--queued-only" in sys.argv else {it["id"]: it for it in not_queued(set(queue))}
+    for it in list(queue.values()) + list(new.values()):
         on = [p for p in MAIN if st.get(it["id"], {}).get(p, {}).get("posted")]
         if on:
             posted.append({"id": it["id"], "creator": it["creator"], "title": it["title"], "on": on,
@@ -59,7 +85,8 @@ def main():
             continue
         job, _, name = it["id"].partition("/")
         clips.append({"id": it["id"], "title": it["title"], "hook": it.get("hook"), "creator": it["creator"],
-                      "seconds": it["duration"], "warnings": it.get("warnings") or [], "note": it.get("why"),
+                      "seconds": it["duration"], "warnings": it.get("warnings") or [],
+                      "note": "rendered, not in the queue yet" if it["id"] in new else it.get("why"),
                       "source_age_hours": source_age(job), "said": spoken(job, name)})
     if not clips:
         status(state="done", finished=time.time(), count=0); print("nothing to rank"); return
@@ -74,7 +101,9 @@ What matters, in order:
 3. Length: 12-25 s is best; 25-40 s needs a much stronger hook; over 60 s goes last.
 4. Variety: don't put the same creator back to back, and avoid repeating the creators of the most recent posts first.
 5. Warnings: a warning that says the clip must be re-cut, or anything that makes it a bad post, means hold.
-{"6. These rules from the page's own results override the above:" + chr(10) + learning if learning else ""}
+6. Not every clip deserves a post: hold the weak ones (no real hook or payoff, needs context, a near-duplicate of a
+   better clip, spoilers/leaks) and say why in the reason. Holding a third of them is fine when they're weak.
+{"7. These rules from the page's own results override the above:" + chr(10) + learning if learning else ""}
 Most recent posts (newest first): {json.dumps([{k: r[k] for k in ("creator", "title", "on")} for r in recent], ensure_ascii=False)}
 
 Clips (said = what's spoken in the clip):
@@ -98,9 +127,13 @@ Reply with JSON only, no prose and no code fence: a list of every clip id above,
     order = [{"id": o["id"], "reason": str(o.get("reason", ""))[:200], "hold": bool(o.get("hold"))}
              for o in order or [] if isinstance(o, dict) and o.get("id") in ids]
     order += [{"id": i, "reason": "", "hold": False} for i in [c["id"] for c in clips] if i not in {o["id"] for o in order}]
+    if new:   # the not-yet-queued clips join the queue, in Claude's order (holds included, so they show as on hold)
+        added = U.jload(U.ADDED, [])
+        have = {x["id"] for x in added}
+        U.jsave(U.ADDED, added + [it for cid, it in new.items() if cid not in have])
     U.jsave(ORDER, {"at": time.time(), "by": "claude", "order": order})
     U.log(event="reranked", count=len(order), first=order[0]["id"] if order else None)
-    status(state="done", finished=time.time(), count=len(order))
+    status(state="done", finished=time.time(), count=len(order), added=len(new), held=sum(1 for o in order if o["hold"]))
     for k, o in enumerate(order, 1):
         print(f"{k:2}. {'HOLD ' if o['hold'] else ''}{o['id']}: {o['reason']}")
 

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from common import ROOT, ffprobe, load_json, tool  # noqa: E402
+from common import ROOT, ffprobe, load_json, save_json, tool  # noqa: E402
 
 JOBS = (ROOT / "jobs").resolve()
 WEB = (HERE.parent / "web" / "out").resolve()   # the Next.js editor UI, built with `npm run build` in tool/web
@@ -648,7 +648,7 @@ def queue_post(path, body):
             raise ValueError("already re-ranking")
         U.UP.mkdir(parents=True, exist_ok=True)
         U.jsave(U.UP / "rerank.json", {"state": "running", "started": time.time()})
-        RERANK["proc"] = subprocess.Popen([sys.executable, str(HERE / "rerank.py")], cwd=str(ROOT),
+        RERANK["proc"] = subprocess.Popen([sys.executable, str(HERE / "rerank.py"), *([] if body.get("all", True) else ["--queued-only"])], cwd=str(ROOT),
                                           stdout=open(U.UP / "rerank.log", "w"), stderr=subprocess.STDOUT)
         return {"ok": True}
     cid = str(body.get("id", ""))
@@ -666,6 +666,9 @@ def queue_post(path, body):
         except SystemExit as e:
             raise ValueError(str(e))
         U.jsave(U.ADDED, added)
+        rm = U.jload(QDIR / "removed.json", [])
+        if f"{job}/{name}" in rm:
+            U.jsave(QDIR / "removed.json", [x for x in rm if x != f"{job}/{name}"])
         return {"ok": True}
     if path == "/api/queue/postnow":   # Claude posts this clip now, in Chrome (scripts/post_now.py)
         pn = U.jload(U.UP / "postnow.json", {})
@@ -734,6 +737,8 @@ def queue_post(path, body):
         if not any(x["id"] == cid for x in added):
             raise ValueError("this clip comes from queue/queue.json (a hand-ranked list): remove it there, or skip it for the uploader")
         U.jsave(U.ADDED, [x for x in added if x["id"] != cid])
+        removed = U.jload(QDIR / "removed.json", [])   # so "rank all" doesn't put it back
+        U.jsave(QDIR / "removed.json", sorted(set(removed) | {cid}))
         return {"ok": True}
     raise ValueError("unknown queue action")
 
@@ -771,28 +776,77 @@ def extract_runs(limit=6):
         if not st["active"] and st.get("stage") not in ("done", "stopped", "error"):
             st["stage"] = "stopped"   # the process died without saying so
         for j in st.get("jobs", []):
-            jd = JOBS / j["job"]
-            pr = load_json(jd / "progress.json") if (jd / "progress.json").exists() else {}
-            j["progress"] = {k: pr.get(k) for k in ("stage", "chunks_total", "chunks_done", "sections_total", "sections_done", "error")}
-            if not j.get("title") and (jd / "info.json").exists():
-                info = load_json(jd / "info.json"); j["title"], j["channel"] = info.get("title"), info.get("channel")
+            job_progress(j)
             j["claude_log"] = tail(d / f"claude_{j['job']}.log", 14, noise=False) if st.get("opts", {}).get("claude") else []
         st["pipeline_log"] = tail(d / "pipeline.log", 6)
+        st["choose_log"] = tail(d / "choose.log", 8, noise=False)
         st["render_log"] = tail(d / "render.log", 4)
         runs.append(st)
-    return runs
+    return terminal_runs({j["job"] for r in runs if r["active"] for j in r.get("jobs", [])}) + runs
+
+
+PROGRESS_KEYS = ("stage", "chunks_total", "chunks_done", "sections_total", "sections_done", "error", "error_at",
+                 "started", "updated", "finished", "audio_sec")
+
+
+def job_progress(j):
+    """Attach jobs/<id>/progress.json (written by pipeline.py) plus the title/channel to a run's job entry."""
+    jd = JOBS / j["job"]
+    try:
+        pr = load_json(jd / "progress.json") if (jd / "progress.json").exists() else {}
+    except json.JSONDecodeError:   # pipeline.py is mid-write
+        pr = {}
+    j["progress"] = {k: pr.get(k) for k in PROGRESS_KEYS}
+    if not j.get("title") and (jd / "info.json").exists():
+        try:
+            info = load_json(jd / "info.json"); j["title"], j["channel"] = info.get("title"), info.get("channel")
+        except json.JSONDecodeError:
+            pass
+    return j
+
+
+def terminal_runs(seen):
+    """pipeline.py runs started from a terminal (or by Claude) rather than this page: every job whose progress.json
+    belongs to a live pipeline process, grouped by that process, so the Extract page shows them too."""
+    by_pid, now = {}, time.time()
+    for f in JOBS.glob("*/progress.json"):
+        if f.parent.name in seen or now - f.stat().st_mtime > 86400:
+            continue
+        try:
+            pr = load_json(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not pid_alive(pr.get("pid")):
+            continue
+        st = pr.get("stage")
+        by_pid.setdefault(int(pr["pid"]), []).append(job_progress({
+            "src": pr.get("src", ""), "job": f.parent.name, "stage": st if st in ("done", "error") else "pipeline",
+            "note": (pr.get("error") or "")[-200:] if st == "error" else "", "picks": [], "claude_log": []}))
+    out = []
+    for pid, jobs in by_pid.items():
+        if all(j["stage"] in ("done", "error") for j in jobs):
+            continue   # the process is alive but its videos are finished (e.g. it's waiting on chat replay)
+        started = min((j["progress"].get("started") or now) for j in jobs)
+        out.append({"run": f"terminal-{pid}", "pid": pid, "terminal": True, "active": True, "stage": "pipeline",
+                    "started": started, "updated": now, "urls": [j["src"] for j in jobs],
+                    "opts": {"max_minutes": 0, "picks": 0, "claude": False, "render": False},
+                    "jobs": sorted(jobs, key=lambda j: j["src"]), "pipeline_log": [], "render_log": []})
+    return out
 
 
 def extract_start(body):
     if any(r["active"] for r in extract_runs(3)):
         raise ValueError("an extraction is already running")
     urls = list(dict.fromkeys(str(u).strip() for u in body.get("urls") or [] if str(u).strip()))
-    if not urls or len(urls) > 10:
-        raise ValueError("1 to 10 video links")
+    auto = int(max(0, min(10, float(body.get("auto") or 0))))
+    if not (urls or auto) or len(urls) + auto > 10:
+        raise ValueError("1 to 10 videos")
+    if auto and not trending()["rows"]:
+        raise ValueError("no trending list yet: press Refresh first")
     for u in urls:
         if not VIDEO_URL.match(u):
             raise ValueError(f"not a YouTube video link: {u[:80]}")
-    cmd = [sys.executable, str(HERE / "extract.py"), *urls,
+    cmd = [sys.executable, str(HERE / "extract.py"), *urls, *(["--auto", str(auto)] if auto else []),
            "--max-minutes", str(int(max(10, min(600, float(body.get("minutes") or 90))))),
            "--picks", str(int(max(1, min(10, float(body.get("picks") or 5))))),
            "--power", body.get("power") if body.get("power") in ("full", "balanced", "cool") else "full"]
@@ -806,10 +860,28 @@ def extract_start(body):
     return {"ok": True}
 
 
+def extract_job(body):
+    """One video of a running extraction: skip it, or (while transcribing) pick from what's transcribed so far."""
+    act = body.get("action")
+    if act not in ("skip", "trim"):
+        raise ValueError("unknown action")
+    for r in extract_runs(3):
+        if r["run"] == body.get("run") and r["active"] and not r.get("terminal"):
+            j = next((j for j in r["jobs"] if j["job"] == body.get("job")), None)
+            if not j:
+                raise ValueError("that video isn't in this run")
+            (EXR / r["run"] / "ctl").mkdir(exist_ok=True)
+            (EXR / r["run"] / "ctl" / j["job"]).write_text(act)
+            return {"ok": True}
+    raise ValueError("that run isn't running")
+
+
 def extract_throttle(body):
     """Run cooler (macOS background priority for every process of the run) or back to full speed, mid-run."""
     for r in extract_runs(3):
         if r["run"] == body.get("run") and r["active"]:
+            if r.get("terminal"):
+                raise ValueError("this run was started from a terminal: it can't be cooled from here")
             (EXR / r["run"] / "throttle").write_text("1" if body.get("on") else "0")
             return {"ok": True}
     raise ValueError("that run isn't running")
@@ -818,6 +890,8 @@ def extract_throttle(body):
 def extract_stop(body):
     for r in extract_runs(3):
         if r["run"] == body.get("run") and r["active"]:
+            if r.get("terminal"):
+                raise ValueError("this run was started from a terminal: stop it there")
             os.killpg(os.getpgid(int(r["pid"])), signal.SIGTERM)   # extract.py and everything it started
             return {"ok": True}
     raise ValueError("that run isn't running")
@@ -856,6 +930,311 @@ def trending_refresh():
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ picks: every moment Claude picked, to render in bulk
+# The render queue is append-only (jobs/.extract/render_queue.jsonl); `extract.py --render-queue` works through it and
+# writes render_state.json. Hidden picks: jobs/<job>/picks_hidden.json.
+
+RQ, RQS = EXR / "render_queue.jsonl", EXR / "render_state.json"
+RQW = {"proc": None, "at": 0}
+RQLOCK = threading.Lock()
+
+
+def rq_lines():
+    return [json.loads(l) for l in RQ.read_text().splitlines() if l.strip()] if RQ.exists() else []
+
+
+def rq_worker_alive():
+    if RQW["proc"] is not None and RQW["proc"].poll() is None:
+        return True
+    try:
+        return pid_alive(load_json(RQS).get("pid")) if RQS.exists() else False
+    except (json.JSONDecodeError, OSError):
+        return True   # mid-write: it's running
+
+
+def rq_start():
+    """Start the render worker unless it's running (not more often than every 20 s, in case it dies at once)."""
+    with RQLOCK:
+        if rq_worker_alive() or time.time() - RQW["at"] < 20:
+            return
+        RQW["at"] = time.time()
+        EXR.mkdir(parents=True, exist_ok=True)
+        RQW["proc"] = subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--render-queue"], cwd=str(ROOT),
+                                       stdout=open(EXR / "render_queue.log", "a"), stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def rq_states():
+    """(job, n) -> the latest queue entry for that pick with its state: queued | fetching | rendering | done | failed."""
+    try:
+        items = load_json(RQS)["items"] if RQS.exists() else {}
+    except (json.JSONDecodeError, OSError, KeyError):
+        items = {}
+    lines = rq_lines()
+    cancelled = {l["cancel"] for l in lines if "cancel" in l}
+    alive = rq_worker_alive()
+    out = {}
+    for l in lines:
+        if "id" not in l:
+            continue
+        key = (l["job"], l["n"])
+        if l["id"] in cancelled:
+            if out.get(key, {}).get("id") == l["id"]:
+                out.pop(key)
+            continue
+        it = items.get(l["id"]) or {"state": "queued"}
+        if it["state"] in ("fetching", "rendering") and not alive:
+            it = {**it, "state": "failed", "error": "stopped before it finished"}
+        out[key] = {"id": l["id"], "op": l.get("op", "render"), "at": l.get("at"), **it}
+    if any(v["state"] == "queued" for v in out.values()) and not alive:
+        rq_start()   # something is waiting and nothing is working on it
+    return out
+
+
+RSTAGES = {"start": "loading the caption models", "words": "timing the captions word by word", "edit": "editing: hook first, cutting pauses",
+           "layout": "finding the webcam", "encode": "encoding the 1080×1920 clip", "done": "finishing"}
+STAGE_RE = re.compile(r"^stage: (\w+) t=([\d.]+)(?: dur=([\d.]+))?")
+
+
+def render_log(job, n):
+    """The stages cut.py reached so far in jobs/.extract/renders/<job>_<n>.log and how far its encode is."""
+    f = EXR / "renders" / f"{job}_{n}.log"
+    st, out, dur = {}, 0.0, None
+    try:
+        lines = f.read_text(errors="replace").splitlines()
+    except OSError:
+        return st, out, dur
+    for l in lines:
+        m = STAGE_RE.match(l)
+        if m:
+            st[m.group(1)] = float(m.group(2))
+            dur = float(m.group(3)) if m.group(3) else dur
+        elif l.startswith("out_time_us=") and l[12:].strip().isdigit():
+            out = int(l[12:]) / 1e6
+    return st, out, dur
+
+
+def render_progress(states):
+    """The render queue for the page: each pick rendering now (fraction, stage, time left) and the time for the rest.
+    Before the encode, progress follows the clock against the usual time to reach the encode (it never passes 50%);
+    the encode (the second half) follows ffmpeg's position in the clip."""
+    active = [v for v in states.values() if v["state"] in ("queued", "fetching", "rendering")]
+    if not active:
+        return None
+    try:
+        items = load_json(RQS).get("items", {}) if RQS.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        items = {}
+    took = sorted((v for v in items.values() if v.get("clip") and v.get("finished") and v.get("started")), key=lambda v: v["finished"])
+    recent = took[-10:]
+    per = sum(v["finished"] - v["started"] for v in recent) / len(recent) if recent else 40.0
+    encs = [v["stages"]["done"] - v["stages"]["encode"] for v in recent if "done" in (v.get("stages") or {}) and "encode" in v["stages"]]
+    enc = sum(encs) / len(encs) if encs else 15.0   # seconds the encode usually takes
+    pre = max(5.0, per - enc)                       # seconds from start until the encode begins
+    since = min(v.get("at") or time.time() for v in active)
+    done_now = sum(1 for v in took if v["finished"] >= since - 5)
+    now = []
+    for (job, n), v in states.items():
+        if v["state"] != "rendering":
+            continue
+        el = time.time() - (v.get("started") or time.time())
+        st, out, dur = render_log(job, n)
+        last = max(st, key=st.get) if st else "start"
+        label = RSTAGES.get(last, last)
+        if last in ("encode", "done") and dur:
+            f = min(1.0, out / dur)
+            frac, left = 0.5 + 0.5 * f, enc * (1 - f)
+            label += f" · {round(100 * f)}%"
+        else:
+            frac, left = min(0.48, 0.5 * el / pre), max(0.0, pre - el) + enc
+        now.append({"job": job, "n": n, "frac": round(frac, 3), "label": label, "left": round(left)})
+    queued = sum(1 for v in active if v["state"] != "rendering" and v.get("op", "render") == "render")
+    par = max(1, int(os.environ.get("CLIP_RENDERS_AT_ONCE", "3")))
+    left = (max((x["left"] for x in now), default=0)) + queued * per / par
+    return {"now": now, "queued": queued, "done": done_now, "per": round(per), "par": par, "left": round(left)}
+
+
+def picks_data():
+    states = rq_states()
+    rendered = {}   # (job, pick n) -> clips rendered from it
+    for m in JOBS.glob("*/edits/*.json"):
+        mp4 = m.with_suffix(".mp4")
+        if m.name.startswith(".") or not mp4.exists():
+            continue
+        try:
+            args = load_json(m).get("args") or {}
+        except (json.JSONDecodeError, OSError):
+            continue
+        if args.get("pick") and args.get("set", "candidates_audit") == "candidates_audit":
+            rendered.setdefault((m.parent.parent.name, int(args["pick"])), []).append(
+                {"name": m.stem, "video": rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}", "updated": mp4.stat().st_mtime})
+    videos = []
+    files = sorted(JOBS.glob("*/candidates_audit.json"), key=lambda f: -f.stat().st_mtime)[:40]
+    for f in files:
+        d = f.parent
+        try:
+            info, c = load_json(d / "info.json"), load_json(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        hidden = set(load_json(d / "picks_hidden.json")) if (d / "picks_hidden.json").exists() else set()
+        rk = pick_rank_state(d)
+        src = c.get("source") if c.get("source") and (ROOT / c["source"]).exists() else None
+        picks = []
+        for p in c["candidates"]:
+            fl = p.get("file") if p.get("file") and (ROOT / p["file"]).exists() else None
+            vid, off = (fl, p.get("offset") or 0) if fl else (src, 0) if src else (None, 0)
+            picks.append({"n": p["n"], "tag": p.get("tag") or "", "title": p.get("title") or "", "titles": p.get("titles") or [],
+                          "start": p["start"], "end": p["end"], "text": (p.get("text") or "")[:320],
+                          "preview": rel_media(vid) if vid else None, "t0": max(0.0, p["start"] - off), "offset": off,
+                          "tease": p.get("tease"),
+                          "clips": sorted(rendered.get((d.name, p["n"]), []), key=lambda x: -x["updated"]),
+                          "queue": None if (vid and (states.get((d.name, p["n"])) or {}).get("op") == "fetch"
+                                            and states[(d.name, p["n"])]["state"] == "failed") else states.get((d.name, p["n"])),
+                          "hidden": p["n"] in hidden,
+                          "rank": (rk.get("ranks") or {}).get(str(p["n"]))})
+        if not picks:
+            continue
+        url = info.get("webpage_url") or ""
+        vid_id = info.get("id") if "youtu" in url else None
+        videos.append({"job": d.name, "title": info.get("title") or d.name, "channel": info.get("channel") or info.get("uploader"),
+                       "url": url, "thumb": f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg" if vid_id else None,
+                       "minutes": round((info.get("duration") or 0) / 60), "picked": f.stat().st_mtime, "picks": picks,
+                       "ranking": {k: rk.get(k) for k in ("state", "at", "error", "of")} if rk else None})
+    return {"videos": videos, "worker": rq_worker_alive(), "now": time.time(), "renders": render_progress(states)}
+
+
+THUMBS = threading.Semaphore(4)
+
+
+def pick_rank_state(d):
+    """jobs/<job>/picks_rank.json (written by `extract.py --rank`), with a dead "running" turned into "failed"."""
+    f = d / "picks_rank.json"
+    try:
+        rk = load_json(f) if f.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {"state": "running"}   # mid-write
+    if rk.get("state") in ("running", "queued") and not pid_alive(rk.get("pid")):
+        rk = {"state": "failed", "error": "stopped before it finished"}
+    return rk
+
+
+def picks_rank(body):
+    jobs = [str(j or "") for j in (body.get("jobs") or [body.get("job")])]
+    for job in jobs:
+        if not NAME_RE.match(job) or not (JOBS / job / "candidates_audit.json").exists():
+            raise ValueError("unknown video")
+    jobs = [j for j in dict.fromkeys(jobs) if pick_rank_state(JOBS / j).get("state") not in ("running", "queued")]
+    if len(jobs) > 1:   # one process ranks them three at a time; the rest show as waiting
+        pr = subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--rank-all", *jobs], cwd=str(ROOT),
+                              stdout=subprocess.DEVNULL, stderr=open(EXR / "rank_all.log", "w"), start_new_session=True)
+        for job in jobs:
+            save_json(JOBS / job / "picks_rank.json", {**pick_rank_state(JOBS / job), "state": "queued", "pid": pr.pid})
+        return {"ok": True, "started": len(jobs)}
+    started = 0
+    for job in jobs:
+        pr = subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--rank", job], cwd=str(ROOT),
+                              stdout=subprocess.DEVNULL, stderr=open(JOBS / job / "picks_rank.log", "w"), start_new_session=True)
+        prev = pick_rank_state(JOBS / job)   # keep the old ranking visible until the new one is in
+        save_json(JOBS / job / "picks_rank.json", {**prev, "state": "running", "pid": pr.pid, "started": time.time()})
+        started += 1
+    return {"ok": True, "started": started}
+
+
+def pick_find(job, n):
+    """(job dir, the pick, its video path or None, offset of that video in source seconds)."""
+    if not NAME_RE.match(job or "") or not (JOBS / job / "candidates_audit.json").exists():
+        raise ValueError("unknown video")
+    d = JOBS / job
+    c = load_json(d / "candidates_audit.json")
+    p = next((x for x in c["candidates"] if x["n"] == int(n)), None)
+    if not p:
+        raise ValueError("unknown pick")
+    if p.get("file") and (ROOT / p["file"]).exists():
+        return d, p, ROOT / p["file"], p.get("offset") or 0
+    if c.get("source") and (ROOT / c["source"]).exists():
+        return d, p, ROOT / c["source"], 0
+    return d, p, None, 0
+
+
+def pick_words(q):
+    """What the Picks page's watch view needs to fake the finished clip: words (source seconds) and the hook."""
+    d, p, vid, off = pick_find(q.get("job"), q.get("n", 0))
+    t = p.get("tease")
+    a = min(p["start"], t[0]) if t else p["start"]
+    b = max(p["end"], t[1]) if t else p["end"]
+    return {"words": words_for(d, a, b), "start": p["start"], "end": p["end"], "tease": t, "offset": off}
+
+
+def pick_thumb(job, n):
+    """A still of the pick (its payoff, or its middle), cached in jobs/<job>/thumbs/. None when there's no video."""
+    d, p, vid, off = pick_find(job, n)
+    out = d / "thumbs" / f"pick_{p['n']}.jpg"
+    if out.exists():
+        return out
+    if vid is None:
+        return None
+    t = p.get("tease")
+    at = (t[1] - 0.6 if t else (p["start"] + p["end"]) / 2) - off
+    out.parent.mkdir(exist_ok=True)
+    tmp = out.with_suffix(".tmp.jpg")
+    with THUMBS:
+        subprocess.run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{max(0, at):.2f}", "-i", str(vid), "-frames:v", "1",
+                        "-vf", "scale=480:-2", "-q:v", "4", str(tmp)], capture_output=True, timeout=30)
+    if not tmp.exists():
+        return None
+    tmp.rename(out)
+    return out
+
+
+def picks_render(body):
+    items = body.get("items") or []
+    op = "fetch" if body.get("op") == "fetch" else "render"
+    if not items or len(items) > 200:
+        raise ValueError("choose 1 to 200 picks")
+    busy = {k for k, v in rq_states().items() if v["state"] in ("queued", "fetching", "rendering")}
+    lines = []
+    for it in items:
+        job, n = str(it.get("job", "")), int(it.get("n", 0))
+        if not NAME_RE.match(job) or not (JOBS / job / "candidates_audit.json").exists():
+            raise ValueError(f"unknown video: {job[:40]}")
+        if (job, n) in busy:
+            continue
+        lines.append({"id": f"{time.time():.6f}-{job}-{n}", "job": job, "n": n, "op": op, "at": time.time()})
+    with RQLOCK, open(RQ, "a") as f:
+        f.write("".join(json.dumps(l) + "\n" for l in lines))
+    rq_start()
+    return {"ok": True, "queued": len(lines)}
+
+
+def picks_cancel(body):
+    st = rq_states().get((str(body.get("job")), int(body.get("n", 0))))
+    if not st or st["state"] != "queued":
+        raise ValueError("that pick isn't waiting in the queue")
+    with RQLOCK, open(RQ, "a") as f:
+        f.write(json.dumps({"cancel": st["id"]}) + "\n")
+    return {"ok": True}
+
+
+def picks_hide(body):
+    job = str(body.get("job", ""))
+    if not NAME_RE.match(job) or not (JOBS / job / "candidates_audit.json").exists():
+        raise ValueError("unknown video")
+    f = JOBS / job / "picks_hidden.json"
+    h = set(load_json(f)) if f.exists() else set()
+    ns = {int(n) for n in (body.get("ns") or [body.get("n")]) if n is not None}
+    h = h | ns if body.get("hidden", True) else h - ns
+    save_json(f, sorted(h))
+    return {"ok": True}
+
+
+def picks_summary():
+    try:
+        ps = [p for v in picks_data()["videos"] for p in v["picks"]]
+    except Exception:
+        return None
+    return {"to_render": sum(1 for p in ps if not p["hidden"] and not p["clips"]),
+            "rendering": sum(1 for p in ps if p["queue"] and p["queue"]["state"] in ("queued", "fetching", "rendering"))}
+
+
 def home():
     q = {"to_post": 0, "posted_24h": 0, "next": None, "last_post": None}
     try:
@@ -870,7 +1249,8 @@ def home():
     live = live_state()
     return {"live": {"running": bool(live), "streams": [s["tag"] for s in (live or {}).get("streams", []) if s.get("alive")],
                      "clips": len(live_clips(200))},
-            "extract": (extract_runs(1) or [None])[0], "queue": q, "recent": rendered_clips(12), "now": time.time()}
+            "extract": (extract_runs(1) or [None])[0], "queue": q, "recent": rendered_clips(12), "now": time.time(),
+            "picks": picks_summary()}
 
 
 # ------------------------------------------------------------------ http
@@ -983,6 +1363,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(home())
             if u.path == "/api/queue":
                 return self.send_json(queue_data())
+            if u.path == "/api/picks":
+                return self.send_json(picks_data())
+            if u.path == "/api/pick/words":
+                return self.send_json(pick_words(q))
+            if u.path == "/api/pick/thumb":
+                f = pick_thumb(q.get("job"), q.get("n", 0))
+                return self.send_file(f) if f else self.send_error(404)
             if u.path == "/api/extract":
                 return self.send_json({"runs": extract_runs(), "trending": trending(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude"))})
             if u.path == "/api/health":   # the Python this server starts every job with, and what it can't import
@@ -1014,6 +1401,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(extract_start(body))
             if u.path == "/api/extract/stop":
                 return self.send_json(extract_stop(body))
+            if u.path == "/api/picks/render":
+                return self.send_json(picks_render(body))
+            if u.path == "/api/picks/rank":
+                return self.send_json(picks_rank(body))
+            if u.path == "/api/picks/cancel":
+                return self.send_json(picks_cancel(body))
+            if u.path == "/api/picks/hide":
+                return self.send_json(picks_hide(body))
+            if u.path == "/api/extract/job":
+                return self.send_json(extract_job(body))
             if u.path == "/api/extract/throttle":
                 return self.send_json(extract_throttle(body))
             if u.path == "/api/extract/rerender":

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 
-const TABS: [string, string][] = [["/", "Home"], ["/extract", "Extract"], ["/live", "Live"], ["/queue", "Queue"], ["/edit", "Editor"]];
+const TABS: [string, string][] = [["/", "Home"], ["/extract", "Extract"], ["/picks", "Picks"], ["/live", "Live"], ["/queue", "Queue"], ["/edit", "Editor"]];
 
 /** The desk pages' header: brand, page tabs, then the page's own controls (children). */
 export default function Nav({ children }: { children?: React.ReactNode }) {

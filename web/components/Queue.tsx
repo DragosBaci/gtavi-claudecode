@@ -16,7 +16,7 @@ interface Item {
   rank_reason?: string | null; hold?: boolean; pinned?: boolean;
 }
 interface Other { id: string; job: string; name: string; title: string; creator: string | null; video: string; updated: number; layout: string | null }
-interface Rerank { state?: string; running: boolean; started?: number; finished?: number; error?: string | null; count?: number; order_at?: number | null }
+interface Rerank { state?: string; running: boolean; started?: number; finished?: number; error?: string | null; count?: number; added?: number; held?: number; order_at?: number | null }
 interface PostNow { state?: string; running: boolean; id?: string; started?: number; finished?: number | null; result?: string; posted?: string[]; error?: string | null; log: string[] }
 interface Account { name: string; handles: string[] }
 interface Data { items: Item[]; other: Other[]; max_dur: Record<string, number>; limits: Record<string, number>; last_post: number | null; log: any[]; rerank: Rerank; postnow: PostNow; account: Account | null }
@@ -60,7 +60,8 @@ export default function Queue() {
   const rr = d?.rerank, wasRunning = useRef(false);
   useEffect(() => {   // tell when a re-rank finishes; poll faster while it runs
     if (!rr) return;
-    if (wasRunning.current && !rr.running) say(rr.state === "error" ? `Re-rank failed: ${rr.error}` : `Re-ranked ${rr.count ?? ""} clips`);
+    if (wasRunning.current && !rr.running) say(rr.state === "error" ? `Re-rank failed: ${rr.error}`
+      : `Ranked ${rr.count ?? ""} clips${rr.added ? `, ${rr.added} added to the queue` : ""}${rr.held ? ` · ${rr.held} on hold` : ""}`);
     wasRunning.current = rr.running;
     if (rr.running) { const h = setTimeout(reload, 2000); return () => clearTimeout(h); }
   }, [rr]);   // eslint-disable-line react-hooks/exhaustive-deps
@@ -95,9 +96,10 @@ export default function Queue() {
   return (
     <div className="desk">
       <Nav>
-        <button className="btnx sm" disabled={!d || rr?.running} onClick={() => post("/api/queue/rerank", {}, "Claude is ranking the unposted clips…")}
-          title="Claude orders the unposted clips by hook, freshness, length and variety. The auto-uploader follows this order.">
-          {rr?.running ? "Claude is ranking…" : "✦ Re-rank with Claude"}</button>
+        <button className="btnx sm" disabled={!d || rr?.running}
+          onClick={() => post("/api/queue/rerank", { all: true }, `Claude is ranking ${d ? d.items.filter(i => !done(i)).length + d.other.length : ""} clips…`)}
+          title="Claude ranks every unposted clip, including the rendered ones not in the queue yet (they join the queue). Weak ones go on hold, which the auto-uploader skips. The auto-uploader follows this order.">
+          {rr?.running ? "Claude is ranking…" : `✦ Rank all ${d ? d.items.filter(i => !done(i)).length + d.other.length : ""} with Claude`}</button>
         {rr?.order_at && !rr.running && <span className="lv-sub">ranked {ago(rr.order_at)}</span>}
         {d && <PostingAs account={d.account} save={(name, handles) => post("/api/queue/account", { name, handles }, `Posting as ${name}`)} />}
         <span className="lv-grow" />

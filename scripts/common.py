@@ -5,6 +5,16 @@ from pathlib import Path
 ROOT = Path(os.environ.get("CLIP_DESK_HOME", Path.cwd()))
 JOBS = ROOT / "jobs"
 
+# Desk settings that survive restarts: KEY=VALUE lines in <desk>/.clipdesk.env (the environment wins when both set one),
+# e.g. CLIP_COOKIES_BROWSER=chrome
+try:
+    for _l in (ROOT / ".clipdesk.env").read_text().splitlines():
+        if "=" in _l and not _l.lstrip().startswith("#"):
+            _k, _v = _l.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+except OSError:
+    pass
+
 
 # VP9 first: at the same resolution YouTube's VP9 is much cleaner than its H.264 (~1.8 Mbps at 1080p60).
 # Up to 1440p so the small webcam area has more pixels to enlarge. No AV1: OpenCV (facecam.py) may not decode it.
@@ -59,10 +69,15 @@ def is_url(s):
     return bool(re.match(r"https?://", s))
 
 
-def job_dir(src):
+def job_name(src):
+    """The jobs/<name> folder of a source, without creating it."""
     key = hashlib.sha1(src.encode()).hexdigest()[:8]
     stem = re.sub(r"[^a-z0-9]+", "-", Path(src).stem.lower() if not is_url(src) else src.split("v=")[-1].split("/")[-1].lower())[:24].strip("-")
-    d = JOBS / f"{stem or 'job'}-{key}"
+    return f"{stem or 'job'}-{key}"
+
+
+def job_dir(src):
+    d = JOBS / job_name(src)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -7,13 +7,20 @@ Per source (URL or local file), all sources concurrently:
          otherwise only the sections around the picked moments (no multi-GB VOD downloads)
 The wav is split at quiet points into ~150 s chunks. Chunks from every source go into ONE worker pool
 (GPU worker(s) on Apple Silicon/NVIDIA + CPU workers), so one long VOD and many short videos both use the whole machine.
+The pool is fed shortest-remaining-first: a 10 h VOD doesn't hold up the short videos queued with it.
 When a source's chunks are back: transcript.json -> candidates.json (shorts) + candidates_long.json (long clips).
+Finished chunks are kept in jobs/<id>/parts/ until the transcript is whole, so a stopped run resumes where it was.
+
+Per-source control (--control DIR, the Extract page's buttons): a file DIR/<job id> saying
+  skip   drop this source (stage "skipped")
+  trim   stop transcribing it and score what is transcribed so far (the first unbroken run of chunks);
+         jobs/<id>/trim.json records where it was cut, and a later run picks the transcription up from there.
 
 usage: python pipeline.py URL [URL ...] [--from sources.txt] [--max-minutes 90] [--gpu-workers 1] [--cpu-workers 3]
-                          [--short 15:40] [--long 60:150] [--top 8] [--top-long 4] [--no-long]
+                          [--short 15:40] [--long 60:150] [--top 8] [--top-long 4] [--no-long] [--control DIR]
 Progress: jobs/<id>/progress.json (read by the dashboard).
 """
-import argparse, json, multiprocessing as mp, os, queue, signal, subprocess, sys, threading, time, traceback, wave
+import argparse, json, multiprocessing as mp, os, queue, shutil, signal, subprocess, sys, threading, time, traceback, wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -84,6 +91,9 @@ class Job:
         self.info, self.urls = {}, []
         self.prog = {"pid": os.getpid(), "src": src, "stage": "queued", "started": time.time()}
         self.chunks_total, self.parts = 0, {}
+        self.chunks, self.cuts = [], []   # (a, b) frames per chunk; cut points in seconds
+        self.backlog, self.inflight = [], 0   # chunk tasks not yet handed to a worker; handed out, not back
+        self.cancel = None   # "skip" or "trim" once the user asked for it
         self.video_thread = self.chat_proc = None
         self.full_video = False
         self.db = None
@@ -168,8 +178,13 @@ def start_full_video(job, limit):
     job.video_thread.start()
 
 
-def prepare(job, tasks):
-    """info, background chat + video, audio -> wav -> chunk tasks."""
+def part_file(job, i):
+    a, b = job.chunks[i]
+    return job.d / "parts" / f"{a}-{b}.json"
+
+
+def prepare(job):
+    """info, background chat + video, audio -> wav -> chunk tasks in job.backlog. True when already transcribed."""
     a = job.a
     limit = a.max_minutes * 60
     fetch_info(job)
@@ -192,24 +207,94 @@ def prepare(job, tasks):
         tmp.rename(wav)
     _, job.db = moments.audio_rms(None, job.d)
     log(job.id, f"audio ready: {len(job.db) / 60:.1f} min")
-    if (job.d / "transcript.json").exists():
+    if (job.d / "transcript.json").exists() and not (job.d / "trim.json").exists():
         return True
     with wave.open(str(wav)) as w:
         nframes = w.getnframes()
     cuts = plan_chunks(job.db)
     job.chunks_total = len(cuts) - 1
-    job.update(stage="transcribe", chunks_total=job.chunks_total, chunks_done=0, audio_sec=len(job.db))
-    for i in range(job.chunks_total):
-        b = nframes if cuts[i + 1] is None else cuts[i + 1] * SR
-        tasks.put({"job": job.id, "i": i, "wav": str(wav), "a": cuts[i] * SR, "b": b})
+    job.cuts = cuts[:-1] + [len(job.db)]
+    job.chunks = [(cuts[i] * SR, nframes if cuts[i + 1] is None else cuts[i + 1] * SR) for i in range(job.chunks_total)]
+    for i in range(job.chunks_total):   # chunks an earlier (stopped or cut-short) run already transcribed
+        try:
+            job.parts[i] = load_json(part_file(job, i))
+        except (OSError, ValueError):
+            pass
+    job.update(stage="transcribe", chunks_total=job.chunks_total, chunks_done=len(job.parts), audio_sec=len(job.db))
+    if job.parts:
+        log(job.id, f"{len(job.parts)} of {job.chunks_total} chunks already transcribed")
+    if len(job.parts) == job.chunks_total:
+        save_transcript(job)
+        return True
+    job.backlog = [{"job": job.id, "i": i, "wav": str(wav), "a": a, "b": b}
+                   for i, (a, b) in enumerate(job.chunks) if i not in job.parts]
     return False
+
+
+def save_transcript(job, trim=False):
+    """transcript.json from the finished chunks. trim: only the first unbroken run of them, and trim.json says
+    where that ends so scoring stays inside it. False when there is nothing to keep."""
+    k = job.chunks_total
+    if trim:
+        k = 0
+        while k in job.parts:
+            k += 1
+        if not k:
+            return False
+    words = [w for i in range(k) for w in job.parts[i]]
+    save_json(job.d / "transcript.json", words)
+    if k < job.chunks_total:
+        save_json(job.d / "trim.json", {"sec": job.cuts[k], "chunks": k, "of": job.chunks_total})
+        log(job.id, f"cut short: {len(words)} words from the first {job.cuts[k] / 60:.0f} min ({k}/{job.chunks_total} chunks)")
+    else:
+        (job.d / "trim.json").unlink(missing_ok=True)
+        shutil.rmtree(job.d / "parts", ignore_errors=True)
+        log(job.id, f"transcribed {len(words)} words in {job.chunks_total} chunks")
+    return True
 
 
 # ---------------------------------------------------------------- scoring + video
 
+STREAMS, STREAMS_LOCK = {}, threading.Lock()   # src -> (looked up at, [(stream url, headers)])
+
+
+def stream_urls(src):
+    """The video's stream URLs, looked up once per video and shared by all its sections. YouTube answers bursts of
+    lookups with "confirm you're not a bot", and every yt-dlp call is a lookup; the stream URLs stay valid for hours."""
+    with STREAMS_LOCK:
+        hit = STREAMS.get(src)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        info = ytdlp_json(src, ["-f", VIDEO_FMT])
+        fmts = [(f["url"], f.get("http_headers") or {}) for f in (info.get("requested_formats") or [info]) if f.get("url")]
+        if not fmts:
+            raise RuntimeError("no stream URL in yt-dlp's answer")
+        STREAMS[src] = (time.time(), fmts)
+        return fmts
+
+
 def section(job, s, e, out):
-    """Exact section of the remote video. yt-dlp handles YouTube's signed URLs/headers itself;
-    --force-keyframes-at-cuts re-encodes so frame 0 == s (timestamps stay accurate for captions)."""
+    """Exact section of the remote video, re-encoded so frame 0 == s (timestamps stay accurate for captions).
+    ffmpeg reads the streams directly (input seeking, one lookup per video, see stream_urls); if that fails, yt-dlp
+    does the whole thing (--download-sections --force-keyframes-at-cuts), which is what it does internally too."""
+    try:
+        fmts = stream_urls(job.src)
+        cmd = [tool("ffmpeg"), "-y", "-v", "error"]
+        for u, h in fmts:
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+            if h:
+                cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in h.items())]
+            cmd += ["-ss", f"{s:.2f}", "-t", f"{e - s:.2f}", "-i", u]
+        enc = SECTION_ENCODE[1].split(":", 1)[1].split()
+        run(cmd + ["-map", "0:v:0", "-map", f"{len(fmts) - 1}:a:0?", *enc, "-movflags", "+faststart", str(out)])
+        return
+    except BaseException as ex:   # common.run exits on failure
+        if isinstance(ex, KeyboardInterrupt):
+            raise
+        with STREAMS_LOCK:
+            STREAMS.pop(job.src, None)   # maybe expired: the next section looks it up again
+        Path(out).unlink(missing_ok=True)
+        print(f"direct section download failed, using yt-dlp: {str(ex)[-200:]}", flush=True)
     run(ytdlp_base() + ["-f", VIDEO_FMT, "--download-sections", f"*{s:.2f}-{e:.2f}", "--force-keyframes-at-cuts",
                         *SECTION_ENCODE, "--merge-output-format", "mp4", "-o", str(out), job.src])
 
@@ -228,13 +313,16 @@ def finalize(job, pool):
             log(job.id, "chat replay still downloading, scoring with the part we have")
         time.sleep(1.5)
     job.update(stage="score")
-    dur = float(len(job.db))
+    db = job.db
+    if (d / "trim.json").exists():   # cut short: score only the transcribed part
+        db = db[:int(load_json(d / "trim.json")["sec"])]
+    dur = float(len(db))
     smin, smax = map(float, a.short.split(":"))
-    shorts = moments.score(d, "", job.info, dur, job.db, words, a.top, smin, smax, None, "candidates")
+    shorts = moments.score(d, "", job.info, dur, db, words, a.top, smin, smax, None, "candidates")
     sets = {"candidates": shorts}
     if not a.no_long:
         lmin, lmax = map(float, a.long.split(":"))
-        sets["candidates_long"] = moments.score(d, "", job.info, dur, job.db, words, a.top_long, lmin, lmax, None, "candidates_long")
+        sets["candidates_long"] = moments.score(d, "", job.info, dur, db, words, a.top_long, lmin, lmax, None, "candidates_long")
     # video for the picks
     if job.video_thread:
         job.update(stage="video")
@@ -289,6 +377,7 @@ def main():
     ap.add_argument("--no-long", action="store_true")
     ap.add_argument("--pad", type=float, default=3.0, help="seconds of extra video around each section")
     ap.add_argument("--chat-wait", type=float, default=120, help="max seconds to wait for chat replay after transcription")
+    ap.add_argument("--control", help="folder of per-source control files (see above)")
     a = ap.parse_args()
     srcs = list(a.src)
     if a.from_file:
@@ -309,20 +398,34 @@ def main():
     jobs = {}
     for s in srcs:
         j = Job(s, a); jobs[j.id] = j; j.update(stage="queued")
+    order = {jid: n for n, jid in enumerate(jobs)}
     prep_pool = ThreadPoolExecutor(a.downloads)
     fin_pool = ThreadPoolExecutor(len(jobs))
     sec_pool = ThreadPoolExecutor(6)
     pending = set(jobs)
     finals = []
+    prepared = queue.Queue()   # jobs whose chunks are ready to hand out (main thread owns all dispatching)
+    ctl = Path(a.control) if a.control else None
+    applied = {}
+    slots = a.gpu_workers + a.cpu_workers   # chunks out at once: one per worker, so Skip and cut-short act at once
+    inflight = 0
+
+    def drop(j):
+        with LOCK:
+            pending.discard(j.id)
 
     def prep(j):
         try:
-            if prepare(j, tasks):
-                finals.append(fin_pool.submit(fin, j))
+            if prepare(j):
+                if j.cancel != "skip":
+                    finals.append(fin_pool.submit(fin, j))
+            else:
+                prepared.put(j)
         except BaseException as e:
+            if j.cancel == "skip":
+                return
             j.update(error_at=j.prog.get("stage"), stage="error", error=str(e)[-400:]); log(j.id, f"ERROR {str(e)[-300:]}")
-            with LOCK:
-                pending.discard(j.id)
+            drop(j)
 
     def fin(j):
         try:
@@ -331,8 +434,49 @@ def main():
             traceback.print_exc()
             j.update(error_at=j.prog.get("stage"), stage="error", error=str(e)[-400:]); log(j.id, f"ERROR {str(e)[-300:]}")
         finally:
-            with LOCK:
-                pending.discard(j.id)
+            drop(j)
+
+    def check(j):
+        """All of j's chunks that are going to come back are back: transcript, then scoring."""
+        if j.backlog or j.inflight or j.prog.get("stage") != "transcribe" or j.cancel == "skip":
+            return
+        if len(j.parts) == j.chunks_total or j.cancel == "trim":
+            if save_transcript(j, trim=len(j.parts) < j.chunks_total):
+                j.update(chunks_done=len(j.parts))
+                finals.append(fin_pool.submit(fin, j))
+            else:
+                j.update(stage="skipped", note="cut short before anything was transcribed"); drop(j)
+
+    def control():
+        for f in ctl.glob("*") if ctl and ctl.is_dir() else []:
+            j = jobs.get(f.name)
+            try:
+                act = f.read_text().strip()
+            except OSError:
+                continue
+            if not j or applied.get(j.id) == act or j.id not in pending:
+                continue
+            stage = j.prog.get("stage")
+            if act == "skip" and stage in ("queued", "info", "audio", "transcribe"):
+                applied[j.id] = act
+                j.cancel, j.backlog = "skip", []
+                j.update(stage="skipped"); log(j.id, "skipped")
+                drop(j)
+            elif act == "trim" and stage == "transcribe" and j.cancel is None:
+                applied[j.id] = act
+                j.cancel, j.backlog = "trim", []
+                log(j.id, f"cutting short after {len(j.parts)}/{j.chunks_total} chunks")
+                check(j)
+
+    def feed():
+        """Hand chunks to the workers, shortest-remaining source first (ties: the order they were given)."""
+        nonlocal inflight
+        while inflight < slots:
+            live = [j for j in jobs.values() if j.backlog and not j.cancel]
+            if not live:
+                return
+            j = min(live, key=lambda j: (len(j.backlog) + j.inflight, order[j.id]))
+            tasks.put(j.backlog.pop(0)); j.inflight += 1; inflight += 1
 
     for j in jobs.values():
         prep_pool.submit(prep, j)
@@ -343,6 +487,14 @@ def main():
             with LOCK:
                 if not pending:
                     break
+            while not prepared.empty():
+                j = prepared.get()
+                if j.cancel == "skip":
+                    j.backlog = []
+                else:
+                    check(j)   # cut short while it was still downloading
+            control()
+            feed()
             try:
                 r = results.get(timeout=1)
             except queue.Empty:
@@ -350,19 +502,20 @@ def main():
             if "note" in r:
                 print(r["note"], flush=True); continue
             j = jobs[r["job"]]
+            j.inflight -= 1; inflight -= 1
+            if j.cancel == "skip":
+                continue
             if "error" in r:
                 j.update(error_at=j.prog.get("stage"), stage="error", error=r["error"]); log(j.id, f"chunk {r['i']} failed: {r['error']}")
-                with LOCK:
-                    pending.discard(j.id)
+                j.backlog = []
+                drop(j)
                 continue
             j.parts[r["i"]] = r["words"]
+            part_file(j, r["i"]).parent.mkdir(exist_ok=True)
+            save_json(part_file(j, r["i"]), r["words"])
             st = stats.setdefault(r["dev"], [0.0, 0.0]); st[0] += r["audio"]; st[1] += r["secs"]
             j.update(chunks_done=len(j.parts))
-            if len(j.parts) == j.chunks_total:
-                words = [w for i in sorted(j.parts) for w in j.parts[i]]
-                save_json(j.d / "transcript.json", words)
-                log(j.id, f"transcribed {len(words)} words in {j.chunks_total} chunks")
-                finals.append(fin_pool.submit(fin, j))
+            check(j)
     except KeyboardInterrupt:
         print("stopping…")
     for f in list(finals):

@@ -11,6 +11,7 @@ interface HomeData {
   extract: Run | null;
   queue: { to_post: number; total?: number; next: string | null; last_post: number | null; posted_24h: number };
   recent: Clip[]; now: number;
+  picks: { to_render: number; rendering: number } | null;
 }
 
 const STAGE: Record<string, string> = { starting: "Starting", pipeline: "Transcribing and scoring", picking: "Claude is picking moments", rendering: "Rendering clips", done: "Done", stopped: "Stopped", error: "Failed" };
@@ -34,6 +35,12 @@ export default function Home() {
               : <div className="dk-big">{ex ? `Last run: ${clips} clip${clips === 1 ? "" : "s"}` : "No runs yet"}</div>}
             <div className="dk-sub">{ex ? `${ex.urls.length} video${ex.urls.length === 1 ? "" : "s"} · ${ago(ex.started, d?.now)}` : "Paste a video or pick a trending one; Claude finds the moments and cuts them."}</div>
             <span className="dk-go">{ex?.active ? "Watch progress →" : "New extraction →"}</span>
+          </a>
+          <a className="dk-card" href="/picks">
+            <div className="dk-ct"><span className="dk-ico">✓</span>Picks</div>
+            <div className="dk-big">{d?.picks?.rendering ? <><i className="dk-pulse" />Rendering {d.picks.rendering}</> : d?.picks ? `${d.picks.to_render} to render` : "…"}</div>
+            <div className="dk-sub">Every moment Claude picked. Tick the ones worth posting and render them together.</div>
+            <span className="dk-go">Choose what to render →</span>
           </a>
           <a className="dk-card" href="/live">
             <div className="dk-ct"><span className="dk-ico red">●</span>Live</div>

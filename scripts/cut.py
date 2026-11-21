@@ -410,6 +410,14 @@ def remap_words(words, segs):
     return out
 
 
+T0 = __import__("time").time()
+
+
+def stage(name, extra=""):
+    """A progress marker for the Picks page (it reads the render log): stage name and seconds since start."""
+    print(f"stage: {name} t={__import__('time').time() - T0:.1f}{' ' + extra if extra else ''}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job"); ap.add_argument("--pick", type=int, default=1)
@@ -425,6 +433,9 @@ def main():
     ap.add_argument("--title-secs", type=float, default=0, help="0 = whole clip")
     ap.add_argument("--captions", choices=["word", "bubble", "none"], default="word")
     ap.add_argument("--hook", default="")
+    ap.add_argument("--or-blur", action="store_true",
+                    help="react: when there's no usable streamer face, render the blur (Fit) layout in this same run "
+                         "instead of exiting (the title becomes the hook box) - saves running cut.py twice")
     ap.add_argument("--allow-profanity", action="store_true", help="keep swear words in captions (slurs are always masked)")
     ap.add_argument("--cam", default="auto", help="auto (find the webcam) or x:y:w:h fractions")
     ap.add_argument("--start", type=float); ap.add_argument("--end", type=float)
@@ -476,6 +487,7 @@ def main():
             tease = t
 
     # ---- words: re-transcribed + force-aligned for this clip (cached), or the pipeline transcript
+    stage("words")
     pipe_words = load_json(d / "transcript.json") if (d / "transcript.json").exists() else []
     if a.fast_words:
         words = pipe_words
@@ -488,6 +500,7 @@ def main():
             words = sorted(words + clip_words(d, *tease, src=wsrc, fallback=pipe_words, speaker=speaker), key=lambda w: w["s"])
 
     # ---- edit list: trim to the speech, cut dead air, tease first
+    stage("edit")
     # The tease is the culminating moment: shown first, then the clip restarts and builds up to it, ending right after.
     if tease and s0 <= tease[0] < e0 and not a.keep_after_tease:
         e0 = min(e0, tease[1] + a.after_tease)
@@ -531,17 +544,23 @@ def main():
         SRC, OFF, s0, e0, L0, L1 = str(inter), 0.0, 0.0, total, 0.0, total
     layout, cam, side = a.layout, a.cam, 'right'
     face_expr = None
+    stage("layout")
     if layout in ('react', 'facecam') and cam == 'auto':
         from facecam import find_cam
         r = find_cam(SRC, L0, L1)
         if layout == 'react' and r.get('mode') not in ('cam', 'face'):
-            sys.exit(f"skipped: no streamer face over gameplay in this moment ({r.get('mode')}: {r.get('reason', '')}). "
-                     "React clips need the game on screen with the cam as a separate box. Pick another moment or stream.")
+            if not a.or_blur:
+                sys.exit(f"skipped: no streamer face over gameplay in this moment ({r.get('mode')}: {r.get('reason', '')}). "
+                         "React clips need the game on screen with the cam as a separate box. Pick another moment or stream.")
+            layout, a.layout, a.hook = 'blur_fallback', 'blur', a.hook or a.title   # falls through to "using the blur layout" below
         if layout == 'react':
             from facecam import has_gameplay, face_crop_expr
             if not a.force and not has_gameplay(SRC, L0, L1, r['box']):
-                sys.exit("skipped: the area outside the webcam is not gameplay (same scene or no game on screen). "
-                         "Pick a moment where GTA 6 is on screen.")
+                if not a.or_blur:
+                    sys.exit("skipped: the area outside the webcam is not gameplay (same scene or no game on screen). "
+                             "Pick a moment where GTA 6 is on screen.")
+                print("react: the area outside the webcam is not gameplay")
+                r, a.layout, a.hook = {"reason": "no gameplay beside the cam"}, 'blur', a.hook or a.title
             if r.get('mode') == 'face' and r.get('face_track'):
                 from common import ffprobe as _fp
                 _vs = [x for x in _fp(SRC)['streams'] if x.get('codec_type') == 'video'][0]
@@ -633,7 +652,9 @@ def main():
                   f"adelay={int(ws * 1000)}:all=1[wh];[ax][wh]amix=inputs=2:duration=first:normalize=0[am]")
         v += f";[{'am' if whoosh else 'ax'}]{LOUD}[ao]"
         amap, aopt = ["-map", "[ao]"], []
-    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{L0:.2f}", "-to", f"{L1:.2f}", "-i", SRC, *extra,
+    stage("encode", f"dur={e0 - s0:.2f}")
+    # -progress: out_time lines on stdout, so the render log shows how far the encode is
+    run([tool("ffmpeg"), "-y", "-v", "error", "-progress", "pipe:1", "-stats_period", "1", "-ss", f"{L0:.2f}", "-to", f"{L1:.2f}", "-i", SRC, *extra,
          "-t", f"{e0 - s0:.2f}", "-filter_complex", v, "-map", "[vo]", *amap, *aopt,
          # high quality on purpose: every platform re-compresses the upload, a clean master survives that better
          "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-maxrate", "16M", "-bufsize", "32M",
@@ -649,6 +670,7 @@ def main():
                                      "source_channel": info.get("channel") or info.get("uploader"),
                                      # everything needed to reopen and re-render this clip in the editor
                                      "args": vars(a), "video": str(SRC0), "video_offset": OFF0, "game_x": gx})
+    stage("done")
     print(mp4)
 
 
