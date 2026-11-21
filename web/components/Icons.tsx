@@ -40,4 +40,5 @@ export const LAYOUT_ICON: Record<string, ReactNode> = {
   blur: <S><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5M4 4l5 5M20 4l-5 5M20 20l-5-5M4 20l5-5" /></S>,
   react: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 11h16" /></S>,
   facecam: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 9h16" /></S>,
+  split: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 12h16M8 16l2 2 2-2 2 2 2-2" /></S>,
 };

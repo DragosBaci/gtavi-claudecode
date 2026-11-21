@@ -40,7 +40,8 @@ List the folder you will create and the files in it, then ask for a single "yes"
 - `campaigns.md` (title line and an empty table: name, platform, rate per 1K views, budget left, rules, link, checked on)
 - `payouts.csv` with header `date,campaign,platform,post_url,views,rate_per_1k,est_payout,status` (managed by `scripts/payouts.py`)
 - folders `media/official`, `media/raw`, `media/edits`
+- the posting account, from answer 1: `python "${CLAUDE_PLUGIN_ROOT}/scripts/uploader.py" account --name "<page name>" --handle <handle>` (run from the desk folder; the uploader only ever posts as this account)
 
 ## 4. Finish
 
-Tell the human, in 3 lines: what was installed, where the folder is, and the next step (`campaign-finder`, then `trend-radar`). Remind them that they approve every post and that nothing is uploaded automatically.
+Tell the human, in 3 lines: what was installed, where the folder is, and the next step (`campaign-finder`, then `trend-radar`). Remind them that nothing is posted unless they press Post now or start `upload-next`, and that `desk-tour` shows the Clip Desk.

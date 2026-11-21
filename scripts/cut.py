@@ -25,6 +25,7 @@ W, H = 1080, 1920
 FONTS = Path(__file__).resolve().parent.parent / "fonts"   # Montserrat (SIL OFL), loaded by libass via fontsdir
 CAP_FONT, TITLE_FONT = "Montserrat Black", "Montserrat ExtraBold"
 CAP_SIZE, TITLE_SIZE = 118, 80
+TITLE_Y = {"facecam": int(1920 * 0.38), "fill": 300, "blur": 380}   # title box centre per layout (the editor preview matches)
 LIBASS_SCALE = 0.786   # measured: libass draws Montserrat this much narrower than PIL at the same nominal size
 
 
@@ -417,6 +418,7 @@ def main():
     ap.add_argument("--set", default="candidates", help="candidates (shorts) or candidates_long (pipeline.py)")
     ap.add_argument("--filler", default="random", help="split: video path, name in fillers/ (gta_ramp, subway_vertical...) or random")
     ap.add_argument("--split", type=float, default=0.5, help="split: share of the height for the content")
+    ap.add_argument("--filler-start", type=float, help="split: second of the filler video to start at (default random)")
     ap.add_argument("--name", help="output file name without extension (default clip_<pick> / long_<pick>)")
     ap.add_argument("--title", default="", help="reaction title, e.g. 'Speed REALIZED why GTA 6 took 13 YEARS'")
     ap.add_argument("--title-style", choices=["box", "outline"], default="box")
@@ -575,6 +577,9 @@ def main():
             title = ('outline', a.title, TOP + 40, a.title_secs)
     if a.title and layout == 'split':
         title = ('outline', a.title, 70, a.title_secs)
+    if a.title and layout in TITLE_Y:   # Gameplay: on the seam under the webcam; Fill/Fit: near the top, clear of the captions
+        ty = TITLE_Y[layout]
+        title = ('box', a.title, ty, a.title_secs) if a.title_style == 'box' else ('outline', a.title, ty + 40, a.title_secs)
     ass = out / f"{base}.ass"
     caps = a.captions
     cap_words = words if caps != 'none' else []
@@ -607,7 +612,7 @@ def main():
             filler = Path(a.filler) if Path(a.filler).exists() else fdir / f"{a.filler}.mp4"
         from common import ffprobe as _probe
         fd = float(_probe(filler)["format"]["duration"])
-        fs = random.uniform(0, max(0.0, fd - (e0 - s0) - 1))
+        fs = (a.filler_start % fd) if a.filler_start is not None else random.uniform(0, max(0.0, fd - (e0 - s0) - 1))
         extra = ["-stream_loop", "-1", "-ss", f"{fs:.2f}", "-i", str(filler)]
     LOUD = "loudnorm=I=-14:TP=-1.5:LRA=11"
     amap, aopt = ["-map", "0:a?"], ["-af", LOUD]
@@ -638,7 +643,7 @@ def main():
     main_segs = [sg for sg in segs if len(sg) == 2][1 if tease else 0:]
     save_json(out / f"{base}.json", {"file": str(mp4), "start": main_segs[0][0], "end": main_segs[-1][1], "segments": segs,
                                      "tease": tease, "fps": fps,
-                                     "transition": {"name": a.transition if tease else None, "overlap": xf[1] if xf else 0.0}, "layout": layout, "filler": filler and filler.name,
+                                     "transition": {"name": a.transition if tease else None, "overlap": xf[1] if xf else 0.0}, "layout": layout, "filler": filler and filler.name, "filler_start": round(fs, 2) if filler else None,
                                      "hook": a.hook or a.title, "title": a.title, "cam": cam,
                                      "source_url": info.get("webpage_url"), "source_title": info.get("title"),
                                      "source_channel": info.get("channel") or info.get("uploader"),

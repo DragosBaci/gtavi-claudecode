@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
-import { change, openCrop, openTab, playHook, previewTransition, renameClip, saveDraft, setMode, setSetting, sync, toggleHook } from "@/lib/actions";
-import { AGENT_COLOR, LAYOUTS, TRANS_LIST, transName } from "@/lib/constants";
-import { vMax, vMin } from "@/lib/engine";
-import { estLen } from "@/lib/plan";
+import { change, openCrop, openTab, playHook, previewTransition, renameClip, saveDraft, setMode, setSetting, shuffleFiller, sync, toggleHook } from "@/lib/actions";
+import { AGENT_COLOR, LAYOUTS, TRANS_LIST, fillerName, transName } from "@/lib/constants";
+import { E, tNow, vMax, vMin } from "@/lib/engine";
+import { editPos, estLen } from "@/lib/plan";
 import { setEd, useEd } from "@/lib/store";
 import type { Tab } from "@/lib/types";
 import { clamp, fmt } from "@/lib/util";
@@ -69,14 +69,47 @@ export function Panel() {
           <button data-set="title_style" data-v="box" className={S.title_style !== "outline" ? "on" : ""} onClick={() => setSetting("title_style", "box")}>White box</button>
           <button data-set="title_style" data-v="outline" className={S.title_style === "outline" ? "on" : ""} onClick={() => setSetting("title_style", "outline")}>Outline</button>
         </div></div>
+        <div className="field"><label>Show the title</label><div className="seg">
+          <button data-set="title_secs" data-v="0" className={!S.title_secs ? "on" : ""} onClick={() => change(s => { s.title_secs = 0; }, "title stays the whole clip", true)}>Whole clip</button>
+          <button className={S.title_secs ? "on" : ""} onClick={() => { if (!S.title_secs) { const v = Math.min(3, Math.max(1, Math.round(len / 2))); change(s => { s.title_secs = v; }, `title disappears after ${v} s`, true); } }}>Then hide it</button>
+        </div>
+          {!!S.title_secs && <div className="tsecs">
+            <div className="tsecs-h"><span>Hides at</span><b>{S.title_secs.toFixed(1)} s</b><span>of {len.toFixed(1)} s</span></div>
+            <input type="range" min={0.5} max={Math.max(1, Math.floor(len * 2) / 2)} step={0.5} value={Math.min(S.title_secs, Math.max(1, len))}
+              onChange={e => change(s => { s.title_secs = +e.target.value; }, "title timing", true)} />
+            <button className="btnx sm tsecs-btn" title="Hide the title from the frame the playhead is on" onClick={() => {
+              const o = editPos(P, S, tNow(), false, E.pi);
+              if (o == null || o < 0.3) { setEd({ toast: { msg: "Put the playhead inside the clip first", id: Date.now() } }); return; }
+              change(s => { s.title_secs = Math.round(o * 10) / 10; }, `title hides at ${o.toFixed(1)} s`);
+            }}>⏱ Hide it at the playhead</button>
+          </div>}
+        </div>
         <div className="note">4–9 words, CAPS on 1–2 key words. Name the streamer, leave out the outcome.</div>
       </>);
       case "layout": return (<>
         <div className="cards">{LAYOUTS.map(([k, n, d]) => <Card key={k} k="layout" v={k} on={S.layout === k} title={n} desc={d} onPick={() => setSetting("layout", k)} />)}</div>
+        {S.layout === "split" ? (<>
+          <div className="field" style={{ marginTop: 16 }}><label>Bottom video</label>
+            <div className="cards">
+              {(P.fillers || []).map(f =>
+                <Card key={f.name} k="filler" v={f.name} on={S.filler === f.name} title={fillerName(f.name)} desc={`${Math.round(f.dur / 60)} min of gameplay`} onPick={() => setSetting("filler", f.name)} />)}
+            </div>
+            {!!(P.fillers || []).length && <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
+              <button className="btnx sm" onClick={() => shuffleFiller()}>🎲 Shuffle</button>
+              <button className="btnx sm" onClick={() => shuffleFiller(true)}>🎲 New spot</button>
+              <span style={{ color: "var(--mute)", fontSize: 12.5 }}>starts at {fmt(S.filler_start || 0)}</span>
+            </div>}
+            {!(P.fillers || []).length && <div className="note warn" style={{ marginTop: 10 }}>No videos in fillers/ yet: put a Subway Surfers or parkour .mp4 there.</div>}
+          </div>
+          <div className="field"><label>Clip takes <b style={{ color: "var(--text)" }}>{Math.round((S.split || 0.5) * 100)}%</b> of the height</label>
+            <input type="range" min={0.35} max={0.65} step={0.05} value={S.split || 0.5} onChange={e => change(s => { s.split = +e.target.value; }, "clip size", true)} />
+          </div>
+          <div className="note">What you see is what renders: the same bottom video, from the same second, in step with the clip (muted). Captions sit on the seam, the title at the top.</div>
+        </>) : (
         <div className="field" style={{ marginTop: 16 }}><label>Webcam</label>
           <div className="row"><button className="btnx" onClick={openCrop}>Crop webcam</button><button className="btnx" data-set="cam" data-v="auto" disabled={S.cam === "auto"} onClick={() => setSetting("cam", "auto")}>Track ON</button></div>
           <div className="note" style={{ marginTop: 10 }}>{S.cam === "auto" ? "Track ON: cut.py finds the face at render time. Crop it yourself when it picks the wrong face (a thumbnail, the game character) or for full-body moments." : `Track OFF: your crop ${S.cam}.`}</div>
-        </div>
+        </div>)}
       </>);
       case "transitions": return (<>
         {!S.tease && <div className="note warn">The hook is off, so there is no transition. Turn it on with ⚡ Hook in the toolbar.</div>}

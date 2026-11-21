@@ -5,4 +5,5 @@ test/
 *.mp4
 *.wav
 *.ts
+!web/**/*.ts
 !docs/*.mp4

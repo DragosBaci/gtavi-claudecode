@@ -19,6 +19,9 @@ export default function ClipHeader() {
         <button className="pill" id="clipBtn" onClick={e => { e.stopPropagation(); setEd({ menu: open ? null : "clip" }); }}>
           {I.plus}<span className="t">{P ? P.state.title || P.name : "Open a clip"}</span>{I.chevDown}
         </button>
+        <a className="pill" href="/" title="Clip Desk: Extract, Live, Queue" style={{ textDecoration: "none", fontSize: 13, padding: "6px 11px" }}>
+          <i style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--lime)" }} />Desk
+        </a>
         <div className="peers">
           {ME.name && <i className="me" title={`You (${ME.name}) · click to rename`} style={{ background: ME.color }}
             onClick={() => { const n = prompt("Your name on other people's screens", ME.name); if (n && n.trim()) { renameMe(n); bump(x => x + 1); } }}>{ME.name[0]}</i>}

@@ -1,12 +1,13 @@
 "use client";
-import { openCrop, openTab, setSetting, toggleHook } from "@/lib/actions";
+import { openCrop, openTab, resetEdits, setSetting, toggleHook } from "@/lib/actions";
 import { LAYOUTS, LNAME } from "@/lib/constants";
 import { setEd, useEd } from "@/lib/store";
 import { I, LAYOUT_ICON } from "./Icons";
 
 /** Top center: 9:16 · Layout menu · Track (webcam auto/manual) · Hook on/off. */
 export default function Toolbar() {
-  const S = useEd(s => s.S), menu = useEd(s => s.menu);
+  const S = useEd(s => s.S), P = useEd(s => s.P), menu = useEd(s => s.menu);
+  const dirty = !!(S && P && JSON.stringify(S) !== JSON.stringify(P.state));
   const open = menu === "layout";
   return (
     <div id="toolbar">
@@ -19,6 +20,10 @@ export default function Toolbar() {
       </button>
       <button className="tb" id="hookBtn" title="Play the hook first (Shift+H)" onClick={() => toggleHook()}>
         {I.bolt}<span>Hook: <span className={S?.tease ? "on" : ""}>{S?.tease ? "ON" : "OFF"}</span></span>
+      </button>
+      <button className="tb" id="resetBtn" disabled={!dirty} onClick={resetEdits}
+        title={P?.rendered ? "Back to the last render, before your edits. ⌘Z brings them back." : "Back to the original pick, before your edits. ⌘Z brings them back."}>
+        {I.undo}<span>Reset</span>
       </button>
       <div className={"menu" + (open ? " open" : "")} id="layoutMenu" style={{ left: 60 }} onClick={e => e.stopPropagation()}>
         <div className="mh" onClick={() => openTab("layout")}>Global layout settings {I.chevRight}</div>

@@ -9,7 +9,7 @@
     {
       "name": "gtavi-claudecode",
       "source": "./",
-      "description": "Run a faceless GTA 6 clipping page with the fewest human actions. You approve every post.",
+      "description": "Run a faceless GTA 6 clipping page with the fewest human actions. Nothing is posted until you say so.",
       "version": "0.1.0",
       "category": "productivity",
       "tags": ["gta6", "clipping", "video", "shorts", "whop"]
