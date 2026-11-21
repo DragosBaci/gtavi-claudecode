@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "description": "Run a faceless GTA 6 clipping page with the fewest human actions. Nothing is posted until you say so.",
   "author": {
-    "name": "Bodila51",
-    "url": "https://github.com/Bodila51"
+    "name": "DragosBaci",
+    "url": "https://github.com/DragosBaci"
   },
-  "repository": "https://github.com/Bodila51/gtavi-claudecode",
+  "repository": "https://github.com/DragosBaci/gtavi-claudecode",
   "keywords": ["gta6", "clipping", "video", "shorts", "whop"],
   "skills": ["./skills/"]
 }

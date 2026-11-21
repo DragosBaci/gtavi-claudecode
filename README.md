@@ -16,7 +16,7 @@
 </div>
 
 ```
-/plugin marketplace add Bodila51/gtavi-claudecode
+/plugin marketplace add DragosBaci/gtavi-claudecode
 /plugin install gtavi-claudecode@gtavi-claudecode
 ```
 
