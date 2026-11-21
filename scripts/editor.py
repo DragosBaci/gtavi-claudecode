@@ -989,7 +989,8 @@ class Handler(BaseHTTPRequestHandler):
                 import importlib.util
                 mods = ("yt_dlp", "faster_whisper", "numpy", "cv2", "torch", "transformers")
                 return self.send_json({"python": sys.executable, "missing": [m for m in mods if importlib.util.find_spec(m) is None],
-                                       "ui_built": (WEB / "index.html").exists(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude"))})
+                                       "ui_built": (WEB / "index.html").exists(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude")),
+                                       "prank": prank_delay()})   # a joke paywall, only while DESK/.prank exists
         except (ValueError, KeyError, StopIteration, subprocess.CalledProcessError) as e:
             return self.send_json({"error": str(e) or e.__class__.__name__}, 400)
         self.send_error(404)
@@ -1028,6 +1029,17 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError) as e:
             return self.send_json({"error": str(e) or e.__class__.__name__}, 400)
         self.send_error(404)
+
+
+def prank_delay():
+    """Seconds on the app before the joke paywall shows (a number in DESK/.prank, default 30), or None when it's off."""
+    f = ROOT / ".prank"
+    if not f.is_file():
+        return None
+    try:
+        return max(0, min(3600, float(f.read_text(encoding="utf-8").strip() or 30)))
+    except ValueError:
+        return 30
 
 
 def main():

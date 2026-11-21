@@ -364,3 +364,20 @@ kbd{font:11px ui-monospace,Menlo,monospace;border:1px solid var(--edge);border-r
 .q-acct{display:flex;align-items:center;gap:6px}
 .q-acct input{background:rgba(0,0,0,.25);border:1px solid var(--edge);border-radius:10px;padding:6px 10px;font-size:13px;width:170px}
 .q-acct input:focus{outline:none;border-color:rgba(255,255,255,.25)}
+/* the joke paywall (components/Paywall.tsx) */
+.pw-back{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;padding:16px;background:rgba(8,6,6,.72);backdrop-filter:blur(10px)}
+.pw-card{width:min(420px,100%);background:var(--glass2);border:1px solid var(--edge);border-radius:20px;padding:28px;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.pw-card h2{margin:6px 0 4px;font-size:22px}
+.pw-lock{font-size:34px}
+.pw-sub{color:var(--soft);margin:0 0 14px}
+.pw-card ul{text-align:left;margin:0 auto 16px;padding-left:20px;color:var(--soft);font-size:14px;max-width:300px}
+.pw-price{font-size:15px;color:var(--mute);margin-bottom:14px}.pw-price b{font-size:28px;color:var(--text)}
+.pw-go{width:100%}
+.pw-row{display:flex;justify-content:space-between;margin-top:12px}.pw-row button{color:var(--mute);font-size:13px}.pw-row button:hover{color:var(--soft)}
+.pw-warn{color:var(--red);font-size:13px;margin:10px 0 0}
+.pw-card.shake{animation:pw-shake .35s}
+@keyframes pw-shake{20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
+.pw-back{animation:pw-in .45s ease-out}.pw-back .pw-card{animation:pw-pop .45s cubic-bezier(.2,.9,.3,1.2)}
+.pw-back .pw-card.shake{animation:pw-shake .35s}
+@keyframes pw-in{from{opacity:0}}
+@keyframes pw-pop{from{opacity:0;transform:translateY(16px) scale(.96)}}
