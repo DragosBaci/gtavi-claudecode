@@ -1,6 +1,6 @@
 ---
 name: campaign-submit
-description: Submit posted clip links to the paid clipping campaigns they qualify for (Content Rewards / Whop, Clip) through Claude in Chrome, signed in as the human. Use after clips are posted, when the Earn page's "Submit with Claude" button runs, or when the user says "submit my clips", "submit to the campaign", "send the links to Kai's campaign".
+description: Submit posted clip links to the paid clipping campaigns they qualify for (Content Rewards / Whop, Clip) through Claude in Chrome, signed in as the human. Use after clips are posted, when the Campaigns page's "Submit with Claude" button runs, or when the user says "submit my clips", "submit to the campaign", "send the links to Kai's campaign".
 ---
 
 # Campaign submit

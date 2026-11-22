@@ -56,14 +56,14 @@ Don't paste the whole tour at once. Skip a stop when the user says they know it.
 **What you may do yourself:** read `/api/*` to see what happened.
 **What only the user does:** start a run or a live watch, Render, Post now, and Remove. Each of these runs real work or posts publicly. Explain the button; let them press it.
 
-The nav is the same on every page: **Make · Post · Earn · Live**. The editor opens from any clip.
+The nav is the same on every page: **Make · Post · Campaigns · Live**. The editor opens from any clip.
 
 ### Stop 1. Make, `/`: clips from YouTube videos
 
-- Paste one or more YouTube links, or pick from the trending GTA 6 list (or **Claude chooses** N of them).
+- Paste one or more YouTube links, or pick from the trending GTA 6 list (or **✦ Let Claude choose 3**, which starts right away).
 - **Start**. From there it runs by itself: transcribe, Claude picks moments and looks at their frames, only the ones it would bet on are rendered, each finished clip is checked once more and goes straight into the posting queue.
-- While it runs: progress per video, **Skip** on a video, **❄ Run cooler**, **■ Stop**.
-- **Moments** (below): every moment Claude picked, with its verdict (keep / maybe / drop and why). Keeps render by themselves; tick a *maybe* and **Render** it if you want it too. **▶ Watch** plays them; **Hide** clears the list.
+- While it runs: one progress bar, a status line per video, **■ Stop**.
+- **Moments** (below): the picks that aren't clips yet, with Claude's verdict (keep / maybe and why). Keeps render by themselves and drops stay hidden; press **Render** on a *maybe* if you want it too. **▶ Watch** plays them; **Hide** clears one.
 
 Do now: pick one trending video under 20 minutes and press **Start**. The page can be closed and the run keeps going, so carry on with the tour. Check `GET /api/extract` when the user comes back.
 
@@ -71,11 +71,11 @@ Do now: pick one trending video under 20 minutes and press **Start**. The page c
 
 Open the newest clip (the first item of `GET /api/queue`, or a moment's **Open clip**) and give the user that exact URL.
 
-- **Transcript**: drag across words, then ✂ Cut (Delete), Restore, Set as hook (**H**), Start/End here (**[** **]**), Keep silent (**K**) for a moment with no talking (a jump, a reveal).
+- **Transcript**: drag across words, then ✂ Cut (Delete), ⚡ Hook (**H**), ◼ Keep silent (**K**); **[** **]** set start and end for a moment with no talking (a jump, a reveal).
 - **Preview** (9:16): the layout, title and captions, drawn live without rendering. **Hook first** on/off is **Shift+H**.
-- **Side panel**: *Title*, *Layout* (Split, Focus, Fill, Fit; *Crop webcam* when auto-detect picked the wrong face), *Trim and hook*, *Export*. The look (captions, title box, zoom into the clip) is the same on every clip.
+- **Side panel**: *Title*, *Layout* (Split, Focus, Fill, Fit; *Crop webcam* when auto-detect picked the wrong face), *Trim and hook*. The look (captions, title box, zoom into the clip) is the same on every clip.
 - **Timeline** at the bottom: drag the clip edges and the hook, Shift-drag selects a range, **⌘Z / Ctrl+Z** undoes, Space plays.
-- **Render**: when it's done the clip is in the posting queue and the Post page opens on it. Keep the same file name to replace the clip there.
+- **Render** (bottom bar, shows progress and the last error): when it's done the clip is in the posting queue and the Post page opens on it. Keep the same file name to replace the clip there.
 
 Do now: the user changes the title or cuts one dead line, then presses **Render**.
 
@@ -83,18 +83,18 @@ Do now: the user changes the title or cuts one dead line, then presses **Render*
 
 - **Posting as** (top bar): the only account Claude may post as. Post now and `upload-next` stop if YouTube, TikTok or Instagram is signed in to any other account. If it says **⚠ Set the account you post as**, ask the user for the page name and handle, and save them there (or `PY TOOL/scripts/uploader.py account --name "<name>" --handle <handle>`).
 - Left: **To post** (every clip Claude kept and checked, and every clip rendered in the editor), **Posted**, **On hold**.
-- Select a clip to watch it, and edit its caption per platform (character limits shown, **Copy** buttons). The text is saved for the auto-uploader too.
-- **▶ Post next** moves the clip to the front of the line (nothing is posted yet). **Remove** takes it out for good.
+- Select a clip to watch it, and edit its caption per platform (character limits shown). The text is saved for the auto-uploader too.
+- **Remove** takes it out for good.
 - **🚀 Post now** (press twice to confirm): Claude posts the clip in Chrome on YouTube Shorts, TikTok and Instagram. These are real public posts, on the accounts signed in to Chrome. **■ Stop** halts it. Before the first post, the user signs in to all three in Chrome (with Claude in Chrome installed). Claude never types a password or solves a CAPTCHA.
-- Mark a clip posted by hand: paste the **post link (optional)**.
+- **X** is posted by hand: its tab has **Copy**, **Mark as posted** and the post link.
 
 Do now: set **Posting as** if it's empty, and read the captions of the clip from stop 2. Don't post during the tour unless the user says to.
 
-### Stop 3b. Earn, `/earn`: paid campaigns
+### Stop 3b. Campaigns, `/campaigns`: a category per paid campaign
 
-- The campaigns `campaign-finder` found, with their rate, budget and how many of your clips already qualify.
-- Join one on its own page (only the user does this), then **I joined it**, paste its rules (Claude reads them into settings) and add its overlay PNG if it needs one.
-- From then on its creators' clips get the overlay, go out first, and their links are submitted after posting (**Submit with Claude** does the pending ones). Views, estimated and paid money show at the top; record real payouts at the bottom.
+- Left: the campaigns `campaign-finder` found, the ones paying on YouTube first. Right: what it pays for, the clips ready to post for it, and the posted ones with their views and submission status.
+- Join one on its own page (only the user does this), then under **Set up** press **I joined it**, paste its rules (Claude reads them into settings) and add its overlay PNG if it needs one.
+- From then on its creators' clips get the overlay, go out first, and their links are submitted after posting (**Submit with Claude** does the pending ones). Once one is joined, views and estimated and paid money show at the top (payouts come from `payouts.csv`).
 
 Do now: open the campaign the user is most likely to join and read its rate and rules together.
 
@@ -111,7 +111,7 @@ Do now: only if the user wants to. A watch streams every channel the whole time 
 ## 4. Finish
 
 One short message:
-- **Cheat sheet:** Make = clips from videos (picked, checked and queued by Claude) · Post = what gets posted · Earn = paid campaigns and money · Live = clips from streams · Editor = fix and render. Editor keys: Delete cut, H hook, [ ] start/end, K keep silent, Shift+H hook on/off, Space play, ⌘Z undo.
+- **Cheat sheet:** Make = clips from videos (picked, checked and queued by Claude) · Post = what gets posted · Campaigns = a category per paid campaign: its clips, posts, views and money · Live = clips from streams · Editor = fix and render. Editor keys: Delete cut, H hook, [ ] start/end, K keep silent, Shift+H hook on/off, Space play, ⌘Z undo.
 - **Where files are:** `jobs/<job>/edits/<name>.mp4` (finished clips; the `.json` next to each one reopens it exactly as it was made).
 - **Restart later:** `cd DESK && PY TOOL/scripts/editor.py`, then open http://127.0.0.1:8766.
 - **Automatic posting:** `/loop 2h /gtavi-claudecode:upload-next` posts the best queued clip every 2 hours (chooses the best one, uploads, records the links). It needs Claude in Chrome, the three platforms signed in, and **Posting as** set. Each run asks for permissions the first time; offer to add `ClaudeInChromeDomain(www.youtube.com)`, `ClaudeInChromeDomain(studio.youtube.com)`, `ClaudeInChromeDomain(www.tiktok.com)`, `ClaudeInChromeDomain(www.instagram.com)` and the UPL command to `.claude/settings.json` so it can run unattended.

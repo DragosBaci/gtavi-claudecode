@@ -136,6 +136,15 @@ def campaign_info(cid):
         return []
 
 
+def campaign_target(cid):
+    """The campaign this clip was made for (a campaign run tags its renders), or None."""
+    try:
+        import campaigns
+        return campaigns.clip_meta(cid)[0].get("campaign")
+    except Exception:
+        return None
+
+
 def items():
     """Every queued clip, in queue order: build_queue.py's ranking, then clips added on the Queue page.
     Text edited on the Queue page (overrides.json) replaces the generated text."""
@@ -149,6 +158,7 @@ def items():
         if qw:
             it["warnings"] = list(it.get("warnings") or []) + qw
         it["campaigns"] = campaign_info(cid)
+        it["target"] = campaign_target(cid)
     for cid, by_platform in jload(OVERRIDES, {}).items():
         if cid in out:
             for plat, fields in by_platform.items():

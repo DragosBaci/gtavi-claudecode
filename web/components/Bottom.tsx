@@ -31,7 +31,6 @@ export default function Bottom() {
       <div className="tlbar">
         <div className="tl-left">
           <button className="ib" onClick={() => setEd({ tlHidden: !tlHidden })}>{I.hide}<span>{tlHidden ? "Show timeline" : "Hide timeline"}</span></button>
-          <button className="ib" title="Cut the selection (Delete)" onClick={() => act("cut")}>{I.split}</button>
           <button className="ib" title="Cut the selection (Delete)" onClick={() => act("cut")}>{I.trash}</button>
           <button className="ib" title="Mute" style={{ opacity: muted ? 0.45 : 1 }} onClick={mute}>{I.volume}</button>
           <button className="ib" title="Undo (⌘Z)" onClick={doUndo}>{I.undo}</button>
@@ -43,9 +42,7 @@ export default function Bottom() {
           <div className="time" ref={time}>00:00.00 <span>/ 00:00.00</span></div>
         </div>
         <div className="tl-right zoomer">
-          <button className="ib" onClick={() => setZoom(zoom / 1.5)}>{I.zoomOut}</button>
           <input type="range" min={1} max={12} step={0.1} value={zoom} onChange={e => setZoom(+e.target.value)} />
-          <button className="ib" onClick={() => setZoom(zoom * 1.5)}>{I.zoomIn}</button>
         </div>
       </div>
       <div id="tlwrap" ref={wrap}><canvas id="tl" ref={cv} /></div>
@@ -55,14 +52,15 @@ export default function Bottom() {
 }
 
 function Dock() {
-  const P = useEd(s => s.P), S = useEd(s => s.S), render = useEd(s => s.render);
+  const P = useEd(s => s.P), S = useEd(s => s.S), render = useEd(s => s.render), failed = useEd(s => s.lastRender);
   if (!P || !S) return <div id="dock"><div className="info">{I.add}<span>—</span></div><button id="renderBtn" disabled>Render</button></div>;
   const len = estLen(P, S), busy = !!render;
-  const el = render?.status.elapsed ?? 0;
+  const st = render?.status;
   return (
     <div id="dock">
-      <div className="info">{I.add}<span>edits/<b>{P.name}</b>.mp4</span><span className={"len " + (len >= 12 && len <= 25 ? "ok" : "warn")}>≈ {len.toFixed(1)} s</span></div>
-      <button id="renderBtn" disabled={busy} onClick={() => { stop(); doRender(); }}>{busy ? `Rendering… ${Math.round(el)}s` : "Render"}</button>
+      <div className="info">{I.add}<span>edits/<b>{P.name}</b>.mp4</span><span className={"len " + (len >= 12 && len <= 25 ? "ok" : "warn")}>≈ {len.toFixed(1)} s</span>
+        {failed?.state === "error" && !busy && <span className="len warn" title={(failed.log || []).join("\n")}>✕ last render failed (hover for the log)</span>}</div>
+      <button id="renderBtn" disabled={busy} onClick={() => { stop(); doRender(); }}>{st ? `Rendering · ${st.stage} · ${Math.round(st.elapsed)}s` : "Render"}</button>
     </div>
   );
 }

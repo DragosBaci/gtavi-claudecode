@@ -37,4 +37,4 @@ export interface ClipGroup {
 export interface RenderStatus { state: "running" | "done" | "error"; stage: string; elapsed: number; log?: string[]; output?: string; id?: string }
 
 export type Mode = "edit" | "free" | "rendered";
-export type Tab = "text" | "layout" | "trim" | "export";
+export type Tab = "text" | "layout" | "trim";

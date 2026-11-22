@@ -1,6 +1,6 @@
 "use client";
 // Post: the posting queue. Every clip Claude kept and checked lands here by itself (and every clip you render in the
-// editor). Select one to watch it, edit its text per platform, post it now, move it to the front, or remove it.
+// editor). Select one to watch it, edit its text per platform, post it now or remove it. X is posted by hand.
 // The auto-uploader (upload-next) decides the order when it posts. Text edits go to queue/overrides.json, which it uses too.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/util";
@@ -13,14 +13,17 @@ interface Item {
   id: string; rank: number; title: string; hook: string; why: string; warnings: string[]; creator: string; duration: number;
   format: string; source_url: string; source_title: string; platforms: Record<string, Record<string, string>>;
   job: string; name: string; video: string | null; state: Partial<Record<Plat, PState>>; skipped: { reason: string; at: string } | null; added: boolean;
-  rank_reason?: string | null; hold?: boolean; pinned?: boolean;
+  rank_reason?: string | null; hold?: boolean; pinned?: boolean; target?: string | null; cats: string[];
   campaigns?: { id: string; name: string; rate: number | null; pool: string | null; eligible: boolean; problems: string[] }[];
 }
 const paid = (i: Item) => (i.campaigns || []).filter(c => c.eligible);
 const pay = (i: Item) => Math.max(0, ...paid(i).map(c => c.rate || 0.01));
 interface PostNow { state?: string; running: boolean; id?: string; started?: number; finished?: number | null; result?: string; posted?: string[]; error?: string | null; log: string[] }
 interface Account { name: string; handles: string[] }
-interface Data { items: Item[]; max_dur: Record<string, number>; limits: Record<string, number>; last_post: number | null; log: any[]; postnow: PostNow; account: Account | null }
+interface Camp { id: string; name: string; rate_per_1k: number | null; pool: string | null; joined: boolean; platforms: string[]; url: string }
+const short = (c: Camp) => c.name.split(" (")[0];
+const cpay = (c: Camp) => c.rate_per_1k ? `$${c.rate_per_1k}/1K` : c.pool ? "pool" : "";
+interface Data { campaigns: Camp[]; items: Item[]; max_dur: Record<string, number>; limits: Record<string, number>; last_post: number | null; log: any[]; postnow: PostNow; account: Account | null }
 
 const PLATS: { k: Plat; short: string; name: string; fields: [string, string, string | null][]; max: number }[] = [
   { k: "tiktok", short: "TT", name: "TikTok", fields: [["Caption", "caption", "tiktok"]], max: 600 },
@@ -53,7 +56,7 @@ const left = (i: Item) => MAIN.filter(p => !i.state[p]?.posted).map(p => PLATS.f
 
 export default function Queue() {
   const { data: d, reload } = usePoll<Data>("/api/queue", 5000);
-  const [tab, setTab] = useState<Tab>("todo"), [sel, setSel] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("todo"), [sel, setSel] = useState<string | null>(null), [camp, setCamp] = useState("");
   const [msg, setMsg] = useState<{ t: string; id: number } | null>(null);
   const say = (t: string) => setMsg({ t, id: Date.now() });
   useEffect(() => { const q = new URLSearchParams(location.search); const t = q.get("tab") as Tab | null; if (t) setTab(t); if (q.get("id")) setSel(q.get("id")); }, []);
@@ -68,9 +71,9 @@ export default function Queue() {
 
   const list = useMemo(() => {
     if (!d) return [];
-    const l = d.items.filter(i => tab === "skipped" ? !done(i) && (!!i.skipped || !!i.hold) : tab === "posted" ? done(i) : !done(i) && !i.skipped && !i.hold);
+    const l = d.items.filter(i => (!camp || i.cats.includes(camp)) && (tab === "skipped" ? !done(i) && (!!i.skipped || !!i.hold) : tab === "posted" ? done(i) : !done(i) && !i.skipped && !i.hold));
     return tab === "todo" ? [...l].sort((a, b) => pay(b) - pay(a)) : l;   // paid campaign clips go out first
-  }, [d, tab]);
+  }, [d, tab, camp]);
   const counts = d ? { todo: d.items.filter(i => !done(i) && !i.skipped && !i.hold).length, posted: d.items.filter(done).length,
     skipped: d.items.filter(i => !done(i) && (i.skipped || i.hold)).length } : null;
   const item = d?.items.find(i => i.id === sel) || null;
@@ -90,7 +93,7 @@ export default function Queue() {
       <Nav>
         {d && <PostingAs account={d.account} save={(name, handles) => post("/api/queue/account", { name, handles }, `Posting as ${name}`)} />}
         <span className="lv-grow" />
-        {d && <span className="lv-sub">{MAIN.map(p => `${PLATS.find(x => x.k === p)!.short} ${d.items.filter(i => i.state[p]?.posted).length}/${d.items.length}`).join(" · ")} · last post {ago(d.last_post)}</span>}
+        {d && <span className="lv-sub">last post {ago(d.last_post)}</span>}
       </Nav>
       <div className="q-body">
         <aside className="q-list">
@@ -98,17 +101,21 @@ export default function Queue() {
             {([["todo", "To post"], ["posted", "Posted"], ["skipped", "On hold"]] as [Tab, string][]).map(([k, n]) =>
               <button key={k} className={tab === k ? "on" : ""} onClick={() => { setTab(k); setSel(null); }}>{n}<span>{counts?.[k] ?? ""}</span></button>)}
           </div>
+          {!!d?.campaigns.length && <select className="inp q-camps" value={camp} onChange={e => { setCamp(e.target.value); setSel(null); }}>
+            <option value="">All campaigns · {d.items.length}</option>
+            {d.campaigns.map(c => <option key={c.id} value={c.id}>{short(c)} · {cpay(c)} · {d.items.filter(i => i.cats.includes(c.id)).length}</option>)}
+          </select>}
           <div className="q-rows">
             {list.map((i, k) => (
               <button key={i.id} className={"q-row" + (sel === i.id ? " on" : "")} onClick={() => setSel(i.id)}>
                 {i.video ? <video src={i.video + "#t=0.5"} muted preload="metadata" /> : <div className="q-novid" />}
                 <div>
                   <b><span className="q-rank">{tab === "todo" ? `#${k + 1}` : done(i) ? "✓" : `#${i.rank}`}</span>{i.title}</b>
-                  {tab === "todo" && i.rank_reason && <span className="q-why">{i.rank_reason}</span>}
-                  <span>{i.creator} · {fmtDur(i.duration)}{i.added ? " · added here" : ""}</span>
+                  <span>{i.creator} · {fmtDur(i.duration)}</span>
                   <span className="q-dots">{PLATS.map(p => <i key={p.k} className={i.state[p.k]?.posted ? "on" : ""} title={p.name}>{p.short}</i>)}
                     {!!i.warnings.length && <em title={i.warnings.join("\n")}>⚠ {i.warnings.length}</em>}{i.skipped && <em>skipped</em>}
-                    {i.hold && <em title={i.rank_reason || ""}>hold</em>}{!!paid(i).length && <em className="q-camp" title={paid(i).map(c => c.name).join(", ")}>$ {paid(i)[0].rate ? `${paid(i)[0].rate}/1K` : "pool"}</em>}{i.pinned && !done(i) && <em className="q-next">next</em>}{done(i) && left(i).length > 0 && <em className="q-left">{left(i).join(" ")} left</em>}</span>
+                    {i.hold && <em title={i.rank_reason || ""}>hold</em>}{!!paid(i).length && <em className="q-camp" title={paid(i).map(c => c.name).join(", ")}>$ {paid(i)[0].rate ? `${paid(i)[0].rate}/1K` : "pool"}</em>}{done(i) && left(i).length > 0 && <em className="q-left">{left(i).join(" ")} left</em>}
+                    {i.cats[0] && d?.campaigns.find(c => c.id === i.cats[0]) && <em className="q-camp">{short(d.campaigns.find(c => c.id === i.cats[0])!)}</em>}</span>
                 </div>
               </button>
             ))}
@@ -133,14 +140,12 @@ function ItemDetail({ i, d, post }: { i: Item; d: Data; post: (p: string, b: Rec
   const [plat, setPlat] = useState<Plat>("tiktok");
   const P = PLATS.find(p => p.k === plat)!, st = i.state[plat] || {};
   const tooLong = i.duration > (d.max_dur[plat] ?? P.max);
+  const manual = !MAIN.includes(plat);   // X: you post it yourself; the uploader posts the others and records the link
   return (
     <div className="q-grid">
       <div className="q-left">
         <Player src={i.video} />
         <PostNowBox id={i.id} pn={d.postnow} post={post} left={left(i)} />
-        {!done(i) && (i.pinned
-          ? <div className="note q-nextnote">▶ Posts next: the auto-uploader takes it on its next run, after the frame check.</div>
-          : <button className="lv-clipbtn q-postnext" onClick={() => post("/api/queue/next", { id: i.id }, "Posts next: first in line for the auto-uploader")}>▶ Post next</button>)}
         <div className="q-acts">
           <a className="btnx" href={editUrl(i.job, i.name)} target="_blank" rel="noreferrer">✎ Edit clip</a>
           {i.skipped && <button className="btnx" onClick={() => post("/api/queue/skip", { id: i.id, skip: false }, "The auto-uploader may post it again")}>Allow auto-upload</button>}
@@ -150,10 +155,12 @@ function ItemDetail({ i, d, post }: { i: Item; d: Data; post: (p: string, b: Rec
       <div className="q-right">
         <div className="q-title">{i.title}</div>
         <div className="lv-sub">{i.creator} · {fmtDur(i.duration)} · {i.format}{i.source_url && <> · <a href={i.source_url} target="_blank" rel="noreferrer">source</a></>}</div>
-        {i.rank_reason && <div className={"note" + (i.hold ? " warn" : "")} style={{ marginTop: 10 }}>
-          <b>{i.hold ? "On hold" : `#${i.rank} in the posting order`}</b>: {i.rank_reason}</div>}
-        {i.why && <div className="note" style={{ marginTop: i.rank_reason ? 0 : 10 }}>{i.why}</div>}
-        {(i.campaigns || []).map(c => <div key={c.id} className={"note" + (c.eligible ? "" : " warn")}>
+        {(i.rank_reason || i.why) && <div className={"note" + (i.hold ? " warn" : "")} style={{ marginTop: 10 }}>
+          {i.hold && <b>On hold: </b>}{i.rank_reason || i.why}</div>}
+        {i.cats[0] && d.campaigns.find(c => c.id === i.cats[0]) && (() => { const c = d.campaigns.find(x => x.id === i.cats[0])!; return (
+          <div className={"note" + (c.joined ? "" : " warn")}><b>{i.target === c.id ? "Made for" : "Fits"} {c.name}</b> · {cpay(c) || "rate unknown"}
+            {c.joined ? "" : ": not joined yet, join it before posting or the views won't count"} · <a href={`/campaigns?id=${c.id}`}>campaign ↗</a></div>); })()}
+        {(i.campaigns || []).filter(c => c.id !== i.cats[0]).map(c => <div key={c.id} className={"note" + (c.eligible ? "" : " warn")}>
           <b>$ {c.name}</b> · {c.rate ? `$${c.rate} per 1K views` : c.pool || "pool"}{c.eligible ? ": its link is submitted after posting" : `: ${c.problems.join("; ")}`}</div>)}
         {i.skipped && <div className="note warn">Skipped by the auto-uploader: {i.skipped.reason}</div>}
         {i.warnings.map(w => <div key={w} className="note warn">⚠ {w}</div>)}
@@ -161,19 +168,20 @@ function ItemDetail({ i, d, post }: { i: Item; d: Data; post: (p: string, b: Rec
           {PLATS.map(p => <button key={p.k} className={plat === p.k ? "on" : ""} onClick={() => setPlat(p.k)}>{p.name}{i.state[p.k]?.posted ? " ✓" : ""}</button>)}
         </div>
         {tooLong && <div className="note warn">{fmtDur(i.duration)} is longer than {P.name} allows ({fmtDur(d.max_dur[plat] ?? P.max)}): skip it there or trim it in the editor.</div>}
-        {P.fields.map(([label, f, lim]) => <TextField key={plat + f} i={i} plat={plat} label={label} field={f} limit={lim ? d.limits[lim] : null} post={post} />)}
-        <div className="q-posted">
+        {P.fields.map(([label, f, lim]) => <TextField key={plat + f} i={i} plat={plat} label={label} field={f} limit={lim ? d.limits[lim] : null} post={post} copy={manual} />)}
+        {manual && <div className="note">You post on {P.name} yourself: copy the text, then save the post link here.</div>}
+        {manual ? <div className="q-posted">
           <button className={"btnx" + (st.posted ? " q-ok" : "")} onClick={() => post("/api/queue/state", { id: i.id, platform: plat, posted: !st.posted }, st.posted ? "Marked not posted" : `Marked posted on ${P.name}`)}>
             {st.posted ? `✓ Posted${st.by === "claude-uploader" ? " by the uploader" : ""}` : "Mark as posted"}</button>
           <UrlField key={plat + (st.url || "")} url={st.url || ""} onSave={u => post("/api/queue/state", { id: i.id, platform: plat, url: u, posted: true }, "Link saved")} />
           {st.url && <a className="btnx sm" href={st.url} target="_blank" rel="noreferrer">Open</a>}
-        </div>
+        </div> : st.url ? <div className="q-posted"><span className="lv-chip ok">✓ Posted</span><a className="btnx sm" href={st.url} target="_blank" rel="noreferrer">Open post ↗</a></div> : null}
       </div>
     </div>
   );
 }
 
-function TextField({ i, plat, label, field, limit, post }: { i: Item; plat: Plat; label: string; field: string; limit: number | null; post: (p: string, b: Record<string, unknown>, ok?: string) => void }) {
+function TextField({ i, plat, label, field, limit, post, copy }: { i: Item; plat: Plat; label: string; field: string; limit: number | null; post: (p: string, b: Record<string, unknown>, ok?: string) => void; copy: boolean }) {
   const orig = i.platforms[plat]?.[field] || "";
   const [v, setV] = useState(orig);
   useEffect(() => setV(orig), [orig]);
@@ -181,7 +189,7 @@ function TextField({ i, plat, label, field, limit, post }: { i: Item; plat: Plat
   return (
     <div className="field">
       <label>{label}<span className={"q-count" + (over ? " over" : "")}>{limit != null ? `${n} / ${limit}` : `${n}`}</span>
-        <button className="btnx sm" style={{ marginLeft: 8 }} onClick={() => navigator.clipboard.writeText(v).catch(() => {})}>Copy</button></label>
+        {copy && <button className="btnx sm" style={{ marginLeft: 8 }} onClick={() => navigator.clipboard.writeText(v).catch(() => {})}>Copy</button>}</label>
       <textarea className="inp" rows={field === "description" ? 5 : field === "title" ? 2 : 4} value={v} onChange={e => setV(e.target.value)}
         onBlur={() => { if (v !== orig) post("/api/queue/text", { id: i.id, platform: plat, field, value: v }, "Saved: the auto-uploader will use it"); }} />
     </div>

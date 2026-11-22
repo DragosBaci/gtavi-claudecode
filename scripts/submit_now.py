@@ -1,4 +1,4 @@
-"""Submit posted clips to the paid campaigns they qualify for, now (the Earn page's "Submit with Claude" button).
+"""Submit posted clips to the paid campaigns they qualify for, now (the Campaigns page's "Submit with Claude" button).
 
 Starts a headless Claude with Claude in Chrome (`claude -p --chrome`) that follows the plugin's skills/campaign-submit
 for every to_submit entry in queue/submissions.json: it opens each campaign's page signed in as you, pastes the post
@@ -37,7 +37,7 @@ def main():
     upl = f"{py} {HERE / 'uploader.py'}"
     U.jsave(SETTINGS, {"permissions": {"allow": [*(f"ClaudeInChromeDomain({d})" for d in SITES), "mcp__claude-in-chrome", "Read",
                                                   f"Bash({upl}:*)"]}})
-    prompt = f"""Submit the posted clips to their paid campaigns now. The human pressed "Submit with Claude" on the Earn page:
+    prompt = f"""Submit the posted clips to their paid campaigns now. The human pressed "Submit with Claude" on the Campaigns page:
 that is their approval to submit every pending entry. Nobody is watching the run: don't stop to ask.
 
 Read {SKILL} and follow it. In it, UPL means exactly `{upl}`. There are {len(todo)} entries to submit

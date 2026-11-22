@@ -6,7 +6,7 @@ import type Hls from "hls.js";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/util";
 import { editUrl } from "@/lib/desk";
-import Nav from "./Nav";
+import Nav, { Toast } from "./Nav";
 
 type Point = [number, number, number | null];   // wall time, msgs/s, x normal (null while learning)
 interface LStream {
@@ -21,9 +21,8 @@ interface LClip {
 interface LiveResp { running: boolean; starting: boolean; status: LStatus | null; log: string[]; clips: LClip[]; now: number; exit_code: number | null }
 interface Top { login: string; name: string; url: string; viewers: number; title: string; preview: string | null; lang?: string }
 
-// x the usual number of people chatting, held for 3 s (watch.py Detector)
-const SENS: [number, string, string][] = [[2.5, "Sensitive", "more clips, more misses"], [3, "Normal", "3× the usual people chatting, for 3+ s"], [4, "Big moments", "only when chat explodes"]];
-const DURS: [number, string][] = [[30, "30 min"], [60, "1 h"], [120, "2 h"], [240, "4 h"]];
+// A clip is cut when 3x the usual number of people chat for 3+ s (watch.py Detector). Watches for 2 h; +1 h extends.
+const RATIO = 3, MINUTES = 120;
 const hhmm = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const left = (s: number) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h} h ${m} min` : `${m} min`; };
 const kfmt = (n: number) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "K" : String(n));
@@ -99,7 +98,7 @@ export default function Live() {
       <Nav>
         {st ? (<>
           <span className="lv-rec"><i />Watching {streams.length} stream{streams.length === 1 ? "" : "s"}</span>
-          <span className="lv-sub">ends in {left(st.end_at - (d?.now || 0))} · clips when {st.ratio}× the usual people chat for 3+ s · keys 1–{Math.min(9, Math.max(1, streams.length))} clip a stream</span>
+          <span className="lv-sub">ends in {left(st.end_at - (d?.now || 0))}</span>
           <span className="lv-grow" />
           <button className="btnx sm" onClick={() => setAdding(a => !a)}>＋ Add stream</button>
           <button className="btnx sm" onClick={() => cmd({ do: "extend", minutes: Math.round((st.end_at - (d?.now || 0)) / 60) + 60 }, "Extended by 1 hour")}>＋1 h</button>
@@ -246,36 +245,29 @@ function ClipCard({ c }: { c: LClip }) {
   );
 }
 
+/** English GTA 6 streams on Twitch right now (paste a URL for any other). */
 function StreamPicker({ top, picked, onToggle, exclude = [] }: { top: Top[] | null; picked: string[]; onToggle: (t: Top) => void; exclude?: string[] }) {
-  const [lang, setLang] = useState<string>(() => { try { return localStorage.getItem("live:lang") || "EN"; } catch { return "EN"; } });
-  const pick = (l: string) => { setLang(l); try { localStorage.setItem("live:lang", l); } catch { /* private mode */ } };
   if (top === null) return <div className="lv-none">Finding GTA 6 streams on Twitch…</div>;
-  const langs = [...new Set(top.map(t => t.lang).filter(Boolean))] as string[];
-  const rows = top.filter(t => !exclude.includes(t.url) && (lang === "ALL" || t.lang === lang || picked.includes(t.url)));
-  return (<>
-    {langs.length > 1 && <div className="lv-langs">{["EN", ...langs.filter(l => l !== "EN"), "ALL"].map(l =>
-      <button key={l} className={lang === l ? "on" : ""} onClick={() => pick(l)}>{l === "ALL" ? "All languages" : l === "EN" ? "English" : l}
-        <span>{l === "ALL" ? top.length : top.filter(t => t.lang === l).length}</span></button>)}</div>}
-    {!rows.length ? <div className="lv-none">No {lang === "ALL" ? "" : lang + " "}GTA 6 streams on Twitch right now. Pick another language or paste a URL below.</div> :
+  const rows = top.filter(t => !exclude.includes(t.url) && (!t.lang || t.lang === "EN" || picked.includes(t.url)));
+  if (!rows.length) return <div className="lv-none">No English GTA 6 streams on Twitch right now. Paste a URL instead.</div>;
+  return (
     <div className="lv-pick">
       {rows.map(t => (
         <button key={t.url} className={"lv-opt" + (picked.includes(t.url) ? " on" : "")} onClick={() => onToggle(t)}>
           {t.preview ? <img src={thumb(t.preview)} alt="" /> : <div className="lv-noimg" />}
-          <div><b>{t.name}</b><span>{kfmt(t.viewers)} watching{t.lang ? ` · ${t.lang}` : ""}</span><em>{t.title}</em></div>
+          <div><b>{t.name}</b><span>{kfmt(t.viewers)} watching</span><em>{t.title}</em></div>
         </button>
       ))}
-    </div>}
-  </>);
+    </div>);
 }
 
 function Setup({ top, log, onStarted }: { top: Top[] | null; log: string[]; onStarted: () => void }) {
   const [picked, setPicked] = useState<string[]>([]), [extra, setExtra] = useState("");
-  const [ratio, setRatio] = useState(3), [minutes, setMinutes] = useState(120);
   const [err, setErr] = useState(""), [busy, setBusy] = useState(false);
   const urls = [...picked, ...extra.split(/[\s,]+/).filter(Boolean)];
   const start = async () => {
     setBusy(true); setErr("");
-    try { await api("/api/live/start", { urls, ratio, minutes }); onStarted(); } catch (e: any) { setErr(e.message); }
+    try { await api("/api/live/start", { urls, ratio: RATIO, minutes: MINUTES }); onStarted(); } catch (e: any) { setErr(e.message); }
     setBusy(false);
   };
   return (
@@ -286,20 +278,12 @@ function Setup({ top, log, onStarted }: { top: Top[] | null; log: string[]; onSt
       <div className="field"><label>Other streams · Twitch or YouTube live URLs, or Twitch names</label>
         <textarea className="inp" rows={2} value={extra} onChange={e => setExtra(e.target.value)} placeholder="https://twitch.tv/kaicenat   https://www.youtube.com/@IShowSpeed/live" />
       </div>
-      <div className="lv-row">
-        <div className="field"><label>Auto-clip sensitivity</label><div className="seg">
-          {SENS.map(([v, n, h]) => <button key={v} className={ratio === v ? "on" : ""} title={h} onClick={() => setRatio(v)}>{n}</button>)}
-        </div></div>
-        <div className="field"><label>Watch for</label><div className="seg">
-          {DURS.map(([v, n]) => <button key={v} className={minutes === v ? "on" : ""} onClick={() => setMinutes(v)}>{n}</button>)}
-        </div></div>
-      </div>
       {err && <div className="note warn">{err}</div>}
       {!!log.length && <div className="field"><label>Last run ended with an error</label><div className="log">{log.join("\n")}</div></div>}
       <button className="lv-start" disabled={!urls.length || urls.length > 9 || busy} onClick={start}>
         {busy ? "Starting…" : urls.length ? `Watch ${urls.length} stream${urls.length === 1 ? "" : "s"}` : "Pick streams to watch"}
       </button>
-      <div className="note">Each stream keeps a rolling 60 s recording. When {ratio}× the usual number of people start chatting at once and it lasts 3+ seconds, the last ~20 s become a clip with a transcript and the moment set as the hook. Nothing is saved except the clips.</div>
+      <div className="note">Each stream keeps a rolling 60 s recording. When {RATIO}× the usual number of people start chatting at once and it lasts 3+ seconds, the last ~20 s become a clip with a transcript and the moment set as the hook. Nothing is saved except the clips.</div>
     </div>
   );
 }
@@ -329,8 +313,3 @@ function StopButton({ onStop }: { onStop: () => void }) {
   return <button className={"btnx sm" + (armed ? " danger" : "")} onClick={() => (armed ? (setArmed(false), onStop()) : setArmed(true))}>{armed ? "Click again to stop" : "■ Stop"}</button>;
 }
 
-function Toast({ m }: { m: { t: string; id: number } | null }) {
-  const [show, setShow] = useState(false);
-  useEffect(() => { if (!m) return; setShow(true); const h = setTimeout(() => setShow(false), 2600); return () => clearTimeout(h); }, [m]);
-  return <div className={"toast" + (show ? " show" : "")}>{m?.t}</div>;
-}

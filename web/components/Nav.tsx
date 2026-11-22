@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 
-// Make (start clips, see Claude's picks), Post (the posting queue), Earn (paid campaigns), Live (clip streams as they
+// Make (start clips, see Claude's picks), Post (the posting queue), Campaigns (paid campaigns, a category each), Live (clip streams as they
 // happen). The editor opens from a clip, so it has no tab.
-const TABS: [string, string][] = [["/", "Make"], ["/queue", "Post"], ["/earn", "Earn"], ["/live", "Live"]];
+const TABS: [string, string][] = [["/", "Make"], ["/queue", "Post"], ["/campaigns", "Campaigns"], ["/live", "Live"]];
 
 /** The desk pages' header: brand, page tabs, then the page's own controls (children). */
 export default function Nav({ children }: { children?: React.ReactNode }) {

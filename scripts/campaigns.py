@@ -119,7 +119,7 @@ def check(c, meta, info):
         out.append(f"longer than {r['max_sec']} s")
     if r.get("overlay_required"):
         if not overlay_file(c):
-            out.append("needs the campaign's overlay: add it on the Earn page")
+            out.append("needs the campaign's overlay: add it on the Campaigns page")
         elif meta.get("campaign") != c["id"]:
             out.append("rendered without the campaign's overlay: re-render it")
     return out

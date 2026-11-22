@@ -5,7 +5,7 @@ import { useEd } from "@/lib/store";
 import { TL, X } from "@/lib/timeline";
 import { clamp } from "@/lib/util";
 
-const ACTIONS: [string, string, string][] = [["cut", "✂ Cut", "Delete"], ["restore", "↺ Restore", ""], ["hook", "⚡ Hook", "H"], ["start", "⟦ Start", "["], ["end", "End ⟧", "]"], ["keep", "◼ Keep", "K"]];
+const ACTIONS: [string, string, string][] = [["cut", "✂ Cut", "Delete"], ["hook", "⚡ Hook", "H"], ["keep", "◼ Keep", "K"]];
 
 /** Floating toolbar over the selected words (or the selected range on the timeline). */
 export default function SelectionBar() {

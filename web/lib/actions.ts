@@ -156,7 +156,7 @@ export async function doRender() {
   if (S.tease && (S.tease[1] - S.tease[0] < 0.4 || S.tease[1] - S.tease[0] > 4)) { toast("Hook must be 0.4–4 s"); return; }
   try {
     const r = await api("/api/render", { job: P.job, name: P.name, set: P.set, pick: P.pick, state: S });
-    setEd({ render: { id: r.id, status: { state: "running", stage: "starting", elapsed: 0, log: [] } }, tab: "export" });
+    setEd({ render: { id: r.id, status: { state: "running", stage: "starting", elapsed: 0, log: [] } }, lastRender: null });
     pollRender(r.id);
   } catch (e: any) { toast(e.message); }
 }
@@ -169,10 +169,5 @@ async function pollRender(id: string) {
   if (st.state === "done") {
     const P = ed().P!; clearDraft(); toast("Rendered ✓ It's in the posting queue");
     setTimeout(() => { location.href = `/queue?id=${encodeURIComponent(`${P.job}/${P.name}`)}`; }, 700);
-  } else { toast("Render failed: see the log in Export"); setEd({ render: null, lastRender: st }); }
-}
-export function renameClip(n: string) {
-  const P = ed().P; if (!P) return;
-  if (!/^[A-Za-z0-9_\-]{1,60}$/.test(n)) { toast("Letters, digits, _ and - only"); return false; }
-  setEd({ P: { ...P, name: n } }); toast("Renders to " + n + ".mp4"); return true;
+  } else { toast("Render failed"); setEd({ render: null, lastRender: st }); }
 }

@@ -208,6 +208,7 @@ def claude_pick(run, j, n):
            f"Bash({PY} tool/scripts/compact.py:*)", f"Bash({PY} tool/scripts/add_picks.py:*)"]
     before = {x["n"] for x in (load_json(d / "candidates_audit.json")["candidates"] if (d / "candidates_audit.json").exists() else [])}
     t0 = time.time()
+    failed = None   # why Claude stopped without finishing (usage limit, an error, too slow), so a failure isn't read as "nothing worth clipping"
     with open(log, "w", encoding="utf-8") as f:
         try:
             p = subprocess.Popen(cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -223,19 +224,28 @@ def claude_pick(run, j, n):
             for c in ((ev.get("message") or {}).get("content") or []) if ev.get("type") == "assistant" else []:
                 if c.get("type") == "text" and c["text"].strip():
                     f.write("» " + c["text"].strip() + "\n")
+                    if re.search(r"hit your (session|usage) limit|usage limit|rate limit", c["text"], re.I):
+                        failed = c["text"].strip()[:160]
                 elif c.get("type") == "tool_use":
                     inp = c.get("input") or {}
                     what = inp.get("command") or inp.get("file_path") or inp.get("pattern") or ""
                     f.write(f"  {c.get('name')}: {str(what)[:160]}\n")
             if ev.get("type") == "result":
                 f.write(f"\n{'done' if not ev.get('is_error') else 'error'} in {time.time() - t0:.0f} s\n")
+                if ev.get("is_error"):
+                    failed = failed or str(ev.get("result") or "Claude ended with an error")[:160]
             f.flush()
             if time.time() - t0 > CLAUDE_MINUTES * 60:
-                p.kill(); f.write("stopped: took too long\n"); break
+                p.kill(); f.write("stopped: took too long\n"); failed = "Claude took too long"; break
         p.wait()
         PROCS.pop(j["job"], None)
+        if p.returncode not in (0, None) and not failed:
+            failed = f"Claude exited with code {p.returncode}"
     c = load_json(d / "candidates_audit.json") if (d / "candidates_audit.json").exists() else {"candidates": []}
-    return [x for x in c["candidates"] if x["n"] not in before]
+    new = [x for x in c["candidates"] if x["n"] not in before]
+    if not new and failed:
+        return f"Claude couldn't pick: {failed}"
+    return new
 
 
 def auto_pick(run, j, n):
@@ -384,6 +394,8 @@ def pick_job(run, j, a, render_pool, futures):
         return
     if new is None:
         return run.set(j, stage="error", note="claude CLI not found")
+    if isinstance(new, str):   # Claude failed (usage limit, error): a failure, not "nothing worth clipping"
+        return run.set(j, stage="error", note=new)
     with run.lock:
         j["picks"] = [{"n": x["n"], "tag": x.get("tag"), "title": x.get("title"), "start": x["start"], "end": x["end"],
                        "clip": None, "error": None} for x in new]
@@ -392,7 +404,7 @@ def pick_job(run, j, a, render_pool, futures):
     keep = new
     if not a.no_claude:
         run.set(j, stage="reviewing", note=f"Claude is looking at the frames of {len(new)} moment(s)")
-        ranks = rank(j["job"], fetch=True)   # every pick judged with its frames
+        ranks = rank(j["job"], fetch=True, brief=campaign_brief(run))   # every pick judged with its frames (and the campaign)
         if j["stage"] in DONE:
             return
         if ranks:
@@ -695,7 +707,7 @@ def pick_frames(d, c, p):
     return r
 
 
-def rank(job, fetch=False):
+def rank(job, fetch=False, brief=""):
     """Claude ranks a video's picks (not the hidden ones), looking at their frames -> jobs/<job>/picks_rank.json:
     {"state": "running"|"done"|"failed", "pid", "at", "ranks": {n: {"rank", "verdict", "why", "motion", "static"}}, "error"}.
     fetch: download the video of picks that don't have it yet, so every pick is judged with its frames."""
@@ -734,6 +746,10 @@ def rank(job, fetch=False):
                           f"said: {said}\n{frm}")
         prompt = RANK.format(title=info.get("title"), channel=info.get("channel") or info.get("uploader"),
                              picks="\n\n".join(blocks), examples=examples())
+        if brief:   # a campaign run: judge fit to what the campaign pays for, not only general virality
+            prompt += ("\n" + brief + "Judge these picks for this campaign: a moment that shows what the campaign pays for "
+                       "(its product, its creator, its call to action) is not a drop just because it's a talking head or has "
+                       "no gameplay. Still drop weak, confusing or rule-breaking ones.\n")
         exe = os.environ.get("CLAUDE_BIN") or "claude"
         r = subprocess.run([exe, "-p", prompt, "--model", MODEL_PICK, "--output-format", "json", "--allowedTools", "Read"],
                            cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)

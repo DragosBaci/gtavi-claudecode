@@ -1,7 +1,7 @@
 "use client";
 // Watch view for the Picks page: plays each pick the way the finished clip will roughly look (9:16, blurred
 // background, title box, word-by-word captions, hook first) straight from the source video: nothing is rendered.
-// Keys: ←/→ previous/next · space play/pause · S select for render · H hide · Esc close.
+// Keys: ←/→ previous/next · space play/pause · H hide · Esc close.
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/util";
 import { editUrl } from "@/lib/desk";
@@ -33,18 +33,16 @@ function groups(ws: Word[]) {
   return out;
 }
 
-export default function PickWatch({ items, at, selected, onToggle, onRender, onHide, onFetch, onClose }: {
-  items: WItem[]; at: number; selected: (it: WItem) => boolean;
-  onToggle: (it: WItem) => void; onRender: (it: WItem) => void; onHide: (it: WItem) => void; onFetch: (it: WItem) => void; onClose: () => void;
+export default function PickWatch({ items, at, onRender, onHide, onClose }: {
+  items: WItem[]; at: number; onRender: (it: WItem) => void; onHide: (it: WItem) => void; onClose: () => void;
 }) {
   const [i, setI] = useState(at);
-  const [hookFirst, setHookFirst] = useState(true), [autoNext, setAutoNext] = useState(true);
   const [words, setWords] = useState<Word[]>([]);
   const [t, setT] = useState(0), [seg, setSeg] = useState(0), [playing, setPlaying] = useState(false), [ended, setEnded] = useState(false);
   const fg = useRef<HTMLVideoElement>(null), bg = useRef<HTMLVideoElement>(null);
   const it = items[Math.min(i, items.length - 1)];
   const p = it?.p;
-  const segs: [number, number][] = !p ? [] : hookFirst && p.tease && p.tease[1] - p.tease[0] <= 4 ? [p.tease, [p.start, p.end]] : [[p.start, p.end]];
+  const segs: [number, number][] = !p ? [] : p.tease && p.tease[1] - p.tease[0] <= 4 ? [p.tease, [p.start, p.end]] : [[p.start, p.end]];
   const segsRef = useRef(segs); segsRef.current = segs;
   const segRef = useRef(0); segRef.current = seg;
   const go = (d: number) => setI(x => Math.max(0, Math.min(items.length - 1, x + d)));
@@ -74,7 +72,7 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
         const sg = segsRef.current[segRef.current];
         if (sg && !v.paused && src >= sg[1]) {
           if (segRef.current + 1 < segsRef.current.length) { setSeg(segRef.current + 1); segRef.current += 1; seek(segsRef.current[segRef.current][0]); }
-          else { v.pause(); setEnded(true); if (autoNext && i < items.length - 1) setTimeout(() => go(1), 700); }
+          else { v.pause(); setEnded(true); if (i < items.length - 1) setTimeout(() => go(1), 700); }
         }
         const b = bg.current;
         if (b) { if (Math.abs(b.currentTime - v.currentTime) > 0.3) b.currentTime = v.currentTime; if (v.paused !== b.paused) (v.paused ? b.pause() : b.play().catch(() => {})); }
@@ -83,7 +81,7 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [p?.n, it?.job, autoNext, i, items.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [p?.n, it?.job, i, items.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
@@ -92,8 +90,7 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
       else if (e.key === "ArrowRight") go(1);
       else if (e.key === "ArrowLeft") go(-1);
       else if (e.key === " ") { e.preventDefault(); const v = fg.current; if (v) ended ? start() : v.paused ? v.play() : v.pause(); }
-      else if (e.key.toLowerCase() === "s" && it) onToggle(it);
-      else if (e.key.toLowerCase() === "h" && it) { onHide(it); go(1); }
+      else if (e.key.toLowerCase() === "h" && it && !it.p.clips.length) { onHide(it); go(1); }
       else return;
     };
     window.addEventListener("keydown", k);
@@ -104,7 +101,7 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
   const gs = groups(words.filter(w => w.s >= (segs[seg]?.[0] ?? 0) - 0.05 && w.s < (segs[seg]?.[1] ?? 0)));
   const g = gs.find(x => x.ws[0].s <= t && t < x.end);
   const k = g ? Math.max(0, g.ws.findIndex((w, j) => t < (g.ws[j + 1]?.s ?? g.end)) ) : -1;
-  const len = Math.round(p.end - p.start), on = selected(it), busy = !!p.queue && ["queued", "fetching", "rendering"].includes(p.queue.state);
+  const len = Math.round(p.end - p.start), busy = !!p.queue && ["queued", "fetching", "rendering"].includes(p.queue.state);
   const inHook = segs.length > 1 && seg === 0;
   const prog = segs.length ? Math.min(1, Math.max(0, (t - segs[segs.length - 1][0]) / (segs[segs.length - 1][1] - segs[segs.length - 1][0]))) : 0;
 
@@ -117,11 +114,7 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
             <video ref={bg} className="pw-bg" src={p.preview} muted playsInline preload="auto" />
             <video ref={fg} key={`${it.job}:${p.n}`} className="pw-fg" src={p.preview} playsInline preload="auto" autoPlay
               onLoadedMetadata={start} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
-          </> : <div className="pw-missing">
-            <b>Video not downloaded yet</b>
-            {p.queue?.state === "fetching" || p.queue?.state === "queued" ? <span>Downloading… it plays here when it's in</span>
-              : <button className="pk-go" onClick={e => { e.stopPropagation(); onFetch(it); }}>Download to preview (~20 s)</button>}
-          </div>}
+          </> : <div className="pw-missing"><b>No preview for this one</b><span>Render it to see it.</span></div>}
           {p.title && <div className="pw-title"><span>{p.title}</span></div>}
           {g && <div className="pw-cap">{g.ws.map((w, j) => <span key={j} className={j === k ? "on" : ""}>{w.w.toUpperCase()} </span>)}</div>}
           {inHook && p.preview && <div className="pw-hook">hook</div>}
@@ -135,19 +128,12 @@ export default function PickWatch({ items, at, selected, onToggle, onRender, onH
           <div className="pw-t">{p.title || "untitled"}</div>
           {p.rank && <div className={"pk-why v-" + p.rank.verdict}>✦ Claude: #{p.rank.rank}, {p.rank.verdict}{p.rank.why ? ` · ${p.rank.why}` : ""}</div>}
           {p.titles.filter(x => x !== p.title).slice(0, 2).map(x => <div key={x} className="pk-alt">{x}</div>)}
-          <button className={"pw-sel" + (on ? " on" : "")} disabled={busy} onClick={() => onToggle(it)}>
-            {on ? "✓ Selected for render" : "Select for render"} <kbd>S</kbd></button>
           <div className="pw-acts">
-            {!busy && <button className="btnx sm" onClick={() => onRender(it)}>{p.clips.length ? "Render again now" : "Render now"}</button>}
+            {!busy && !p.clips.length && <button className="pk-go" onClick={() => onRender(it)}>Render</button>}
             {p.preview && <a className="btnx sm" href={p.clips[0] ? editUrl(it.job, p.clips[0].name) : editUrl(it.job, null, p.n)} target="_blank" rel="noreferrer">Edit</a>}
-            {!busy && <button className="btnx sm" onClick={() => { onHide(it); go(1); }}>{p.hidden ? "Restore" : "Hide"} <kbd>H</kbd></button>}
-          </div>
-          <div className="pw-opts">
-            <label><input type="checkbox" checked={hookFirst} onChange={e => { setHookFirst(e.target.checked); setTimeout(start, 0); }} /> Hook first, like the final clip</label>
-            <label><input type="checkbox" checked={autoNext} onChange={e => setAutoNext(e.target.checked)} /> Play the next one automatically</label>
+            {!busy && !p.clips.length && <button className="btnx sm" onClick={() => { onHide(it); go(1); }}>Hide <kbd>H</kbd></button>}
           </div>
           <div className="pw-keys"><kbd>←</kbd><kbd>→</kbd> previous / next · <kbd>space</kbd> play · <kbd>Esc</kbd> close</div>
-          <div className="pw-note">A rough preview from the source video. The rendered clip adds the webcam split when there's a face, the rewind after the hook and tighter cuts.</div>
           <button className="btnx sm pw-close" onClick={onClose}>Close</button>
         </aside>
         <button className="pw-nav" disabled={i === items.length - 1} onClick={() => go(1)} title="Next (→)">›</button>

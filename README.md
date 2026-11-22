@@ -64,7 +64,7 @@ No income is promised. Your result depends on speed, picks and hooks, and the sc
 | `setup` | Installs ffmpeg, yt-dlp and faster-whisper, asks 4 questions, builds your page folder |
 | `desk-tour` | Sets up and starts the Clip Desk (http://127.0.0.1:8766), then walks you through Make, Editor, Post and Live while you make your first clip |
 | `campaign-finder` | Live campaigns: rate per 1K views, budget left, rules, link |
-| `campaign-submit` | Submits posted clip links to the paid campaigns they qualify for, in Chrome, signed in as you. Runs after posting and from the Earn page |
+| `campaign-submit` | Submits posted clip links to the paid campaigns they qualify for, in Chrome, signed in as you. Runs after posting and from the Campaigns page |
 | `trend-radar` | GTA 6 videos from the last 24 h ranked by views per hour |
 | `stream-finder` | Who is streaming GTA 6 right now, ranked by viewers |
 | `moment-finder` | Best 15 to 40 s moments, scored by loudness spikes, hype words, YouTube "most replayed" and chat spikes |
@@ -116,29 +116,29 @@ npm run dev                                  # development: http://localhost:300
 
 ### Clip Desk
 
-`scripts/editor.py` serves the whole desk in the browser (run it from the folder that holds `jobs/`). Four pages: **Make · Post · Earn · Live**; the editor opens from any clip.
+`scripts/editor.py` serves the whole desk in the browser (run it from the folder that holds `jobs/`). Four pages: **Make · Post · Campaigns · Live**; the editor opens from any clip.
 
-- **Make** (`/`): paste YouTube links or pick from the trending GTA 6 videos (or let Claude choose them) and press **Start**. Everything after that runs by itself: `pipeline.py` transcribes, Claude (`claude -p`, Opus by default: `CLAUDE_MODEL_PICK`) reads each transcript the way `moment-finder` says and picks moments, looks at 8 frames of each and keeps only the ones it would bet on, `cut.py` renders the keeps (Split when the streamer's webcam is over gameplay, otherwise Focus), Claude checks each finished clip's frames, and the ones that pass go straight into the posting queue. **Moments** below lists every pick with Claude's verdict; render a *maybe* by hand if you want it too.
-- **Post** (`/queue`): the posting queue. Set **Posting as** first. Select a clip to watch it, edit its text per platform (saved to `queue/overrides.json`, which the auto-uploader uses too), **▶ Post next**, **🚀 Post now** (Claude posts it in Chrome), mark it posted with its link, or **Remove** it. The auto-uploader (`upload-next`) decides the order when it posts.
+- **Make** (`/`): paste YouTube links or pick from the trending GTA 6 videos (or let Claude choose them) and press **Start**. Everything after that runs by itself: `pipeline.py` transcribes, Claude (`claude -p`, Opus by default: `CLAUDE_MODEL_PICK`) reads each transcript the way `moment-finder` says and picks moments, looks at 8 frames of each and keeps only the ones it would bet on, `cut.py` renders the keeps (Split when the streamer's webcam is over gameplay, otherwise Focus), Claude checks each finished clip's frames, and the ones that pass go straight into the posting queue. **Moments** below lists the picks that aren't clips yet (the *maybes*) with Claude's verdict; render one by hand if you want it too.
+- **Post** (`/queue`): the posting queue. Set **Posting as** first. Select a clip to watch it, edit its text per platform (saved to `queue/overrides.json`, which the auto-uploader uses too), **🚀 Post now** (Claude posts it on YouTube, TikTok and Instagram in Chrome), or **Remove** it. X is posted by hand: its tab has **Copy**, **Mark as posted** and the post link. The auto-uploader (`upload-next`) decides the order when it posts.
 
-### Earn (paid campaigns)
+### Campaigns (paid campaigns)
 
-`/earn` turns clips into campaign money. `campaign-finder` keeps `campaigns.json` current (rate per 1K views, budget, creators, platforms). Join a campaign on its own page, then on Earn press **I joined it**, paste its rules (Claude turns them into settings: length, required overlay and where, caption text, hashtags, payout limits) and add its overlay PNG. From then on:
+`/campaigns` gives every paid campaign its own category (the ones paying on YouTube first): what it pays for, the clips made for it or of its creators waiting in the queue, and the posted ones with their views and submission status. `campaign-finder` keeps `campaigns.json` current (rate per 1K views, budget, creators, platforms). A Make run can be made **for a campaign** (any live one): Claude picks by its rules and every clip is filed under it, on the Post page too (campaign filter). Join a campaign on its own page, then under **Set up** press **I joined it**, paste its rules (Claude turns them into settings: length, required overlay and where, caption text, hashtags, payout limits) and add its overlay PNG. From then on:
 
 - every new clip of that campaign's creators is rendered with its overlay and the required caption text (`cut.py --overlay`, `campaigns.py`), and a Make run can be made **for a campaign** (that creator's latest videos, picked by its rules);
 - the Post page marks qualifying clips **$** and they go out first; a clip that breaks a rule says why (too long, made without the overlay);
 - when a clip goes live, its link is queued to submit, and Claude submits it in Chrome right after posting, or with **Submit with Claude** (`submit_now.py`, skill `campaign-submit`). It never joins a campaign, accepts terms, signs in or opens payout settings;
-- Earn shows submissions and their status, real views (`scoreboard.csv`), an estimate of what they're worth (rate × views, fee and per-post limits applied) and the payouts you record (`payouts.csv`).
+- once a campaign is joined, the page shows submissions and their status, real views (`scoreboard.csv`), an estimate of what they're worth (rate × views, fee and per-post limits applied) and the payouts in `payouts.csv`.
 
 ### Clip editor
 
 `/edit` fixes a clip:
 
-- **Transcript**: drag across words, then Cut (Delete), Restore, Set as hook (H), Start/End here ([ ]), or Keep silent (K) for a silent visual moment.
+- **Transcript**: drag across words, then Cut (Delete), Set as hook (H) or Keep silent (K) for a silent visual moment. **[** / **]** set the start and end, ⌘Z undoes.
 - **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the zoom into the clip, then the clip with your cuts and the pauses trimmed the way the render trims them.
-- **Side panel**: *Title*, *Layout* (Split, Focus, Fill, Fit; drag the webcam box when auto-detect picked the wrong face), *Trim and hook*, *Export*. The look (word captions, white title box, zoom into the clip, pause trimming, punch-in) is the same on every clip.
+- **Side panel**: *Title*, *Layout* (Split, Focus, Fill, Fit; drag the webcam box when auto-detect picked the wrong face), *Trim and hook*. The look (word captions, white title box, zoom into the clip, pause trimming, punch-in) is the same on every clip.
 - **Timeline**: thumbnails, the clip window and hook with draggable edges, cuts, kept parts and trimmed pauses. Shift-drag selects a range. ⌘Z undoes.
-- **Render** runs `cut.py` with these settings; the finished clip joins the posting queue and the Post page opens on it.
+- **Render** (bottom bar, with progress and the last error) runs `cut.py` with these settings; the finished clip joins the posting queue and the Post page opens on it.
 
 Every render saves its options in the clip's `.json`, so the editor reopens a clip exactly as it was made.
 
@@ -146,7 +146,7 @@ Every render saves its options in the clip's `.json`, so the editor reopens a cl
 
 `http://127.0.0.1:8766/live` runs `watch.py` from the browser:
 
-- **Pick streams**: the top GTA 6 streams on Twitch with thumbnails, or paste Twitch / YouTube live URLs (up to 9). Choose the auto-clip sensitivity and how long to watch.
+- **Pick streams**: the top GTA 6 streams on Twitch with thumbnails, or paste Twitch / YouTube live URLs (up to 9). It watches for 2 hours (**＋1 h** extends) and clips at 3× the usual chat.
 - **Split screen**: every stream plays side by side from the recording itself, with its live chat level over the last 3 minutes (the dashed line is the clip threshold). Click 🔇 to listen to one.
 - **Clips**: a clip is cut automatically when a chat explodes: 3× the usual number of *different people* chatting, held for 3+ seconds, at most 3 clips per stream per 10 minutes unless a bigger moment comes (the tile flashes), or press **Clip now** (keys 1–9) to clip what you just saw. Each clip lands in the feed on the right with an **Edit** link that opens it in the editor with the moment as its hook.
 - **Add stream**, **+1 h** and **Stop** work while it runs. Streams that drop reconnect by themselves. A `watch.py` started from the terminal shows up here too.

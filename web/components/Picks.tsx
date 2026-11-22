@@ -1,7 +1,7 @@
 "use client";
-// Moments (on the Make page): every moment Claude picked, grouped by video, with Claude's verdict from looking at its
-// frames. The keeps are rendered and queued by themselves; render a "maybe" here when you want it too
-// (extract.py --render-queue; a pick whose video isn't downloaded yet is fetched first). Finished clips join the queue.
+// Moments (on the Make page): the moments Claude picked that aren't clips yet, grouped by video. The keeps render and
+// queue by themselves; render a "maybe" here when you want it too (extract.py --render-queue fetches the video first
+// when it isn't on disk). Drops and hidden picks stay out of the way.
 import { useMemo, useState } from "react";
 import { api } from "@/lib/util";
 import { ago, editUrl, usePoll } from "@/lib/desk";
@@ -16,56 +16,43 @@ interface Pick {
   rank: Rank | null;
 }
 interface Rank { rank: number; verdict: "keep" | "maybe" | "drop"; why: string }
-interface Ranking { state: "queued" | "running" | "done" | "failed"; at?: number; error?: string; of?: number }
-interface Video { job: string; title: string; channel: string | null; url: string; thumb: string | null; minutes: number; picked: number; picks: Pick[]; ranking: Ranking | null }
-// Ranked picks first, best first; unranked after, in pick order
-const byRank = (a: Pick, b: Pick) => (a.rank?.rank ?? 1e9) - (b.rank?.rank ?? 1e9) || a.n - b.n;
-const VERDICT: Record<string, string> = { keep: "keep", maybe: "maybe", drop: "drop" };
+interface Video { job: string; title: string; channel: string | null; url: string; thumb: string | null; minutes: number; picked: number; picks: Pick[] }
 interface RNow { job: string; n: number; frac: number; label: string; left: number }
 interface Renders { now: RNow[]; queued: number; done: number; per: number; par: number; left: number }
 interface Data { videos: Video[]; worker: boolean; now: number; renders: Renders | null }
-const dur = (s: number) => s < 60 ? `${Math.max(1, Math.round(s))} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 
-type Filter = "todo" | "done" | "all" | "hidden";
-const key = (job: string, n: number) => `${job}:${n}`;
-const busy = (p: Pick) => !!p.queue && ["queued", "fetching", "rendering"].includes(p.queue.state);
-const isDone = (p: Pick) => p.clips.length > 0;
-const SHOW: Record<Filter, (p: Pick) => boolean> = {
-  todo: p => !p.hidden && !isDone(p), done: p => isDone(p), all: p => !p.hidden, hidden: p => p.hidden,
-};
-const STATE: Record<string, string> = { queued: "waiting to render", fetching: "downloading the video", rendering: "rendering…", failed: "render failed" };
+// Ranked picks first, best first; unranked after, in pick order
+const byRank = (a: Pick, b: Pick) => (a.rank?.rank ?? 1e9) - (b.rank?.rank ?? 1e9) || a.n - b.n;
+const dur = (s: number) => s < 60 ? `${Math.max(1, Math.round(s))} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const busy = (p: Pick) => !!p.queue && ["queued", "fetching", "rendering"].includes(p.queue.state);
+
+type Filter = "todo" | "done";
+const SHOW: Record<Filter, (p: Pick) => boolean> = {
+  todo: p => !p.hidden && !p.clips.length && p.rank?.verdict !== "drop",
+  done: p => p.clips.length > 0,
+};
+const STATE: Record<string, string> = { queued: "waiting to render", fetching: "downloading", rendering: "rendering…", failed: "render failed" };
 
 export default function Picks() {
   const { data: d, reload } = usePoll<Data>("/api/picks", 3000);
   const [filter, setFilter] = useState<Filter>("todo");
-  const [sel, setSel] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState<{ t: string; id: number } | null>(null);
   const say = (t: string) => setMsg({ t, id: Date.now() });
   const [watch, setWatch] = useState<{ keys: string[]; at: number } | null>(null);
 
+  const key = (job: string, n: number) => `${job}:${n}`;
   const all = useMemo(() => (d?.videos || []).flatMap(v => [...v.picks].sort(byRank).map(p => ({ v, p }))), [d]);
-  const count = (f: Filter) => all.filter(x => SHOW[f](x.p)).length;
-  const working = all.filter(x => busy(x.p));
-  const now = working.find(x => x.p.queue?.state === "rendering" || x.p.queue?.state === "fetching");
   const visible = all.filter(x => SHOW[filter](x.p));
-  const chosen = all.filter(x => sel.has(key(x.v.job, x.p.n)));
+  const count = (f: Filter) => all.filter(x => SHOW[f](x.p)).length;
 
-  const toggle = (k: string, on?: boolean) => setSel(s => { const n = new Set(s); (on ?? !n.has(k)) ? n.add(k) : n.delete(k); return n; });
-  const render = (items: { v: Video; p: Pick }[]) =>
-    api("/api/picks/render", { items: items.map(x => ({ job: x.v.job, n: x.p.n })) })
-      .then((r: any) => { say(r.queued ? `${r.queued} clip${r.queued === 1 ? "" : "s"} queued to render` : "Already in the render queue"); setSel(new Set()); reload(); })
-      .catch(e => say(e.message));
-  const hide = (items: { v: Video; p: Pick }[], hidden: boolean) => {
-    const by: Record<string, number[]> = {};
-    items.forEach(x => (by[x.v.job] ||= []).push(x.p.n));
-    Promise.all(Object.entries(by).map(([job, ns]) => api("/api/picks/hide", { job, ns, hidden })))
-      .then(() => { say(hidden ? `Hid ${items.length}` : `Restored ${items.length}`); setSel(new Set()); reload(); }).catch(e => say(e.message));
-  };
-  const fetchVideo = (items: { v: Video; p: Pick }[]) =>
-    api("/api/picks/render", { op: "fetch", items: items.map(x => ({ job: x.v.job, n: x.p.n })) })
-      .then((r: any) => { say(r.queued ? `Downloading ${r.queued} video${r.queued === 1 ? "" : "s"} for preview` : "Already downloading"); reload(); }).catch(e => say(e.message));
-  const missing = visible.filter(x => !x.p.preview && !busy(x.p));
+  const render = (v: Video, p: Pick) => api("/api/picks/render", { items: [{ job: v.job, n: p.n }] })
+    .then((r: any) => { say(r.queued ? "Queued to render" : "Already in the render queue"); reload(); }).catch(e => say(e.message));
+  const hide = (v: Video, p: Pick) => api("/api/picks/hide", { job: v.job, ns: [p.n], hidden: true })
+    .then(() => { say("Hidden"); reload(); }).catch(e => say(e.message));
+  const cancel = (v: Video, p: Pick) => api("/api/picks/cancel", { job: v.job, n: p.n })
+    .then(() => { say("Taken out of the render queue"); reload(); }).catch(e => say(e.message));
+
   // The watch view keeps the list it opened with (hiding a pick doesn't reshuffle it) but reads live state for each one.
   const openWatch = (at?: { v: Video; p: Pick }) => {
     const keys = visible.map(x => key(x.v.job, x.p.n));
@@ -74,146 +61,80 @@ export default function Picks() {
   const byKey = new Map(all.map(x => [key(x.v.job, x.p.n), x]));
   const witems: WItem[] = (watch?.keys || []).map(k => byKey.get(k)).filter((x): x is { v: Video; p: Pick } => !!x).map(x => ({ job: x.v.job, video: x.v.title, p: x.p }));
   const back = (w: WItem) => byKey.get(key(w.job, w.p.n))!;
-  const allDrops = all.filter(x => x.p.rank?.verdict === "drop" && !x.p.hidden && !busy(x.p) && !x.p.clips.length);
-  const cancel = (v: Video, p: Pick) => api("/api/picks/cancel", { job: v.job, n: p.n }).then(() => { say("Taken out of the queue"); reload(); }).catch(e => say(e.message));
+  const r = d?.renders, working = all.filter(x => busy(x.p)).length;
 
   return (
     <section id="moments">
-        <div className="dk-h">Moments{!!working.length && <span className="lv-rec"><i />{working.every(x => x.p.queue?.op === "fetch") ? "Downloading" : "Rendering"} · {working.length} left</span>}</div>
-        <div className="pk-bar">
-          <div className="seg">
-            {([["todo", "To render"], ["done", "Rendered"], ["all", "All"], ["hidden", "Hidden"]] as [Filter, string][]).map(([f, n]) =>
-              <button key={f} className={filter === f ? "on" : ""} onClick={() => setFilter(f)}>{n} <span className="pk-n">{count(f)}</span></button>)}
-          </div>
-          <button className="pk-watch" disabled={!visible.length} onClick={() => openWatch()}>▶ Watch {visible.length}</button>
-          {!!missing.length && <button className="btnx sm" onClick={() => fetchVideo(missing)} title="Some picks have no video on disk yet: download just their moments so they can be previewed">
-            ⤓ Download {missing.length} missing</button>}
-          {!!allDrops.length && <button className="btnx sm danger" title="Moves every pick Claude marked drop to the Hidden tab; you can restore them there"
-            onClick={() => hide(allDrops, true)}>Hide all {allDrops.length} drops</button>}
-          <span className="lv-grow" />
-          {sel.size > 0 ? <>
-            <span className="lv-sub">{sel.size} selected</span>
-            <button className="btnx sm" onClick={() => setSel(new Set())}>Clear</button>
-            {filter === "hidden" ? <button className="btnx sm" onClick={() => hide(chosen, false)}>Restore</button>
-              : <button className="btnx sm" onClick={() => hide(chosen, true)}>Hide</button>}
-            <button className="pk-go" onClick={() => render(chosen)}>Render {sel.size} clip{sel.size === 1 ? "" : "s"}</button>
-          </> : <button className="btnx sm" disabled={!visible.length}
-            onClick={() => setSel(new Set(visible.filter(x => !busy(x.p)).map(x => key(x.v.job, x.p.n))))}>Select all {visible.length}</button>}
+      <div className="dk-h">Moments
+        {!!working && <span className="lv-rec"><i />Rendering {working}{r?.left ? ` · ~${dur(r.left)} left` : ""}</span>}
+      </div>
+      <div className="pk-bar">
+        <div className="seg">
+          {([["todo", "To render"], ["done", "Rendered"]] as [Filter, string][]).map(([f, n]) =>
+            <button key={f} className={filter === f ? "on" : ""} onClick={() => setFilter(f)}>{n} <span className="pk-n">{count(f)}</span></button>)}
         </div>
+        <button className="pk-watch" disabled={!visible.length} onClick={() => openWatch()}>▶ Watch {visible.length}</button>
+      </div>
 
-        {now && <RenderBanner all={all} r={d?.renders || null} fetching={working.filter(x => x.p.queue?.state === "fetching").length} />}
-
-        {!d ? <div className="lv-none">Loading…</div> : !visible.length ? <div className="lv-none">
-          {filter === "todo" ? "Nothing waiting. Start one above: Claude's picks land here, and the ones it keeps render by themselves."
-            : filter === "done" ? "No rendered picks yet." : filter === "hidden" ? "No hidden picks." : "No picks yet."}
-        </div> : d.videos.map(v => {
-          const ps = v.picks.filter(SHOW[filter]).sort(byRank);
-          if (!ps.length) return null;
-          const free = ps.filter(p => !busy(p)), allOn = free.length > 0 && free.every(p => sel.has(key(v.job, p.n)));
-          const rk = v.ranking, ranked = v.picks.filter(p => p.rank && !p.hidden);
-          const drops = ranked.filter(p => p.rank!.verdict === "drop" && !busy(p) && !p.clips.length);
-          const keeps = ps.filter(p => p.rank?.verdict === "keep" && !busy(p));
-          const n = (vd: string) => ranked.filter(p => p.rank!.verdict === vd).length;
-          return (
-            <section key={v.job} className="dk-panel pk-video">
-              <div className="pk-vh">
-                {v.thumb ? <img src={v.thumb} alt="" /> : <div className="lv-noimg" />}
-                <div className="pk-vt">
-                  <b>{v.title}</b>
-                  <span>{v.channel || ""}{v.minutes ? ` · ${v.minutes} min` : ""} · picked {ago(v.picked, d.now)} · {v.picks.filter(isDone).length} of {v.picks.length} rendered
-                    {v.url.startsWith("http") && <> · <a href={v.url} target="_blank" rel="noreferrer">source ↗</a></>}</span>
-                </div>
-                <button className="btnx sm" disabled={!free.length} onClick={() => free.forEach(p => toggle(key(v.job, p.n), !allOn))}>{allOn ? "Unselect" : "Select"} all {free.length}</button>
+      {!d ? <div className="lv-none">Loading…</div> : !visible.length ? <div className="lv-none">
+        {filter === "todo" ? "Nothing waiting. Claude's keeps render by themselves; any maybes show up here." : "No rendered picks yet."}
+      </div> : d.videos.map(v => {
+        const ps = v.picks.filter(SHOW[filter]).sort(byRank);
+        if (!ps.length) return null;
+        return (
+          <section key={v.job} className="dk-panel pk-video">
+            <div className="pk-vh">
+              {v.thumb ? <img src={v.thumb} alt="" /> : <div className="lv-noimg" />}
+              <div className="pk-vt">
+                <b>{v.title}</b>
+                <span>{v.channel || ""}{v.minutes ? ` · ${v.minutes} min` : ""} · picked {ago(v.picked, d.now)}
+                  {v.url.startsWith("http") && <> · <a href={v.url} target="_blank" rel="noreferrer">source ↗</a></>}</span>
               </div>
-              {rk?.state === "failed" && <div className="note warn">Ranking failed: {rk.error || "unknown error"}</div>}
-              {!!ranked.length && <div className="pk-rk">
-                <span>Claude ranked {ranked.length} pick{ranked.length === 1 ? "" : "s"}{rk?.at ? ` ${ago(rk.at, d.now)}` : ""}:</span>
-                <b className="v-keep">{n("keep")} keep</b><b className="v-maybe">{n("maybe")} maybe</b><b className="v-drop">{n("drop")} drop</b>
-                <span className="lv-grow" />
-                {!!keeps.length && <button className="btnx sm" onClick={() => keeps.forEach(p => toggle(key(v.job, p.n), true))}>Select {keeps.length} keep{keeps.length === 1 ? "" : "s"}</button>}
-                {!!drops.length && <button className="btnx sm danger" onClick={() => hide(drops.map(p => ({ v, p })), true)}
-                  title="Moves them to the Hidden tab; you can restore them there">Hide {drops.length} drop{drops.length === 1 ? "" : "s"}</button>}
-              </div>}
-              <div className="pk-grid">
-                {ps.map(p => <PickCard key={p.n} v={v} p={p} on={sel.has(key(v.job, p.n))} onToggle={() => toggle(key(v.job, p.n))}
-                  onRender={() => render([{ v, p }])} onHide={h => hide([{ v, p }], h)} onCancel={() => cancel(v, p)}
-                  onWatch={() => openWatch({ v, p })} onFetch={() => fetchVideo([{ v, p }])}
-                  prog={d.renders?.now.find(x => x.job === v.job && x.n === p.n) || null} />)}
-              </div>
-            </section>
-          );
-        })}
+            </div>
+            <div className="pk-grid">
+              {ps.map(p => <PickCard key={p.n} v={v} p={p} onRender={() => render(v, p)} onHide={() => hide(v, p)} onCancel={() => cancel(v, p)}
+                onWatch={() => openWatch({ v, p })} prog={r?.now.find(x => x.job === v.job && x.n === p.n) || null} />)}
+            </div>
+          </section>
+        );
+      })}
       {watch && !!witems.length && <PickWatch items={witems} at={watch.at} onClose={() => setWatch(null)}
-        selected={w => sel.has(key(w.job, w.p.n))} onToggle={w => toggle(key(w.job, w.p.n))}
-        onRender={w => render([back(w)])} onHide={w => hide([back(w)], !w.p.hidden)} onFetch={w => fetchVideo([back(w)])} />}
+        onRender={w => { const x = back(w); render(x.v, x.p); }} onHide={w => { const x = back(w); hide(x.v, x.p); }} />}
       <Toast m={msg} />
     </section>
   );
 }
 
-// What "render" is doing right now (several clips at once), and how long the queue has left
-function RenderBanner({ all, r, fetching }: { all: { v: Video; p: Pick }[]; r: Renders | null; fetching: number }) {
-  const cur = (r?.now || []).map(x => ({ x, it: all.find(a => a.v.job === x.job && a.p.n === x.n) })).filter(y => y.it);
-  const total = r ? r.done + r.queued + cur.length : 0;
-  const overall = r && total ? (r.done + cur.reduce((a, y) => a + y.x.frac, 0)) / total : 0;
-  return (
-    <div className="dk-panel pk-now">
-      <div className="pk-nowh"><i className="dk-pulse" />
-        <b>{cur.length ? `Rendering ${cur.length} clip${cur.length === 1 ? "" : "s"} at once` : "Downloading"}</b>
-        {!!fetching && <span className="lv-sub">· downloading {fetching} video{fetching === 1 ? "" : "s"}</span>}
-      </div>
-      {cur.map(({ x, it }) => <div key={`${x.job}:${x.n}`} className="pk-nowi">
-        <div className="pk-nowt"><b>{it!.p.title || it!.p.tag}</b><span>{it!.v.title}</span></div>
-        <div className="dk-bar"><i style={{ width: `${x.frac * 100}%` }} /></div>
-        <div className="dk-pl"><b>{Math.floor(x.frac * 100)}%</b><span>{x.label}</span><span className="lv-grow" /><span>~{dur(x.left)} left</span></div>
-      </div>)}
-      {r && total > 1 && <div className="pk-nowi">
-        <div className="dk-bar big"><i style={{ width: `${overall * 100}%` }} /></div>
-        <div className="dk-pl"><b>{r.done} of {total} clips rendered</b><span>{r.queued} waiting · {r.par} at a time · ~{dur(r.per)} each</span>
-          <span className="lv-grow" /><span>~{dur(r.left)} left for all</span></div>
-      </div>}
-    </div>
-  );
-}
-
-function PickCard({ v, p, on, onToggle, onRender, onHide, onCancel, onWatch, onFetch, prog }: {
-  v: Video; p: Pick; on: boolean; onToggle: () => void; onRender: () => void; onHide: (h: boolean) => void; onCancel: () => void;
-  onWatch: () => void; onFetch: () => void; prog: RNow | null;
+function PickCard({ v, p, onRender, onHide, onCancel, onWatch, prog }: {
+  v: Video; p: Pick; onRender: () => void; onHide: () => void; onCancel: () => void; onWatch: () => void; prog: RNow | null;
 }) {
   const [noThumb, setNoThumb] = useState(false);
   const q = p.queue, b = busy(p), clip = p.clips[0];
-  const dur = Math.round(p.end - p.start);
   return (
-    <div className={"pk-card" + (on ? " on" : "") + (b ? " busy" : "") + (p.rank?.verdict === "drop" && !on ? " dropped" : "")}>
+    <div className={"pk-card" + (b ? " busy" : "")}>
       <button className="pk-thumb" onClick={p.preview ? onWatch : undefined} title={p.preview ? "Watch it" : ""}>
         {p.preview && !noThumb ? <img loading="lazy" alt="" src={`/api/pick/thumb?job=${encodeURIComponent(v.job)}&n=${p.n}`} onError={() => setNoThumb(true)} />
           : <div className="pk-nothumb" />}
-        {p.preview ? <span className="pk-playbtn">▶</span>
-          : q?.state === "fetching" || q?.state === "queued" ? <span className="pk-missing">Downloading…</span>
-          : <span className="pk-missing" onClick={e => { e.stopPropagation(); onFetch(); }}>⤓ Download to preview</span>}
-        <span className="pk-dur">{dur} s</span>
-        {p.rank && <span className={"pk-rkb v-" + p.rank.verdict}>#{p.rank.rank} · {VERDICT[p.rank.verdict]}</span>}
-        {clip && <span className="pk-done" style={p.rank ? { top: 32 } : undefined}>✓ rendered</span>}
+        {p.preview && <span className="pk-playbtn">▶</span>}
+        <span className="pk-dur">{Math.round(p.end - p.start)} s</span>
+        {p.rank && <span className={"pk-rkb v-" + p.rank.verdict}>#{p.rank.rank} · {p.rank.verdict}</span>}
       </button>
-      <div className="pk-ch" onClick={() => !b && onToggle()}>
-        <span className={"pk-check" + (on ? " on" : "")}>{on ? "✓" : ""}</span>
+      <div className="pk-ch">
         <span className="dk-tag">{p.tag || `#${p.n}`}</span>
         <span className="lv-sub">{mmss(p.start)}–{mmss(p.end)}</span>
         <span className="lv-grow" />
-        {!clip && q && q.state !== "done" && <span className={"lv-chip" + (q.state === "failed" ? " hot" : "")} title={q.error || ""}>{STATE[q.state]}</span>}
+        {!clip && q && q.state !== "done" && <span className={"lv-chip" + (q.state === "failed" ? " hot" : "")} title={q.error || ""}>
+          {prog ? `${Math.floor(prog.frac * 100)}% · ${prog.label}` : STATE[q.state]}</span>}
       </div>
-      {prog && <div className="pk-prog"><div className="dk-bar"><i style={{ width: `${prog.frac * 100}%` }} /></div>
-        <span>{Math.floor(prog.frac * 100)}% · {prog.label}</span></div>}
       <div className="pk-title">{p.title || "untitled"}</div>
       {p.rank?.why && <div className={"pk-why v-" + p.rank.verdict}>✦ {p.rank.why}</div>}
-      {p.text && <div className="pk-quote">“{p.text}”</div>}
       {q?.state === "failed" && q.error && !clip && <div className="note warn">{q.error}</div>}
       <div className="pk-acts">
         {q?.state === "queued" ? <button className="btnx sm" onClick={onCancel}>Cancel</button>
-          : !b && <button className="btnx sm" onClick={onRender}>{clip ? "Render again" : q?.state === "failed" ? "↻ Retry" : "Render"}</button>}
+          : !b && !clip && <button className="btnx sm" onClick={onRender}>{q?.state === "failed" ? "↻ Retry" : "Render"}</button>}
         {clip && <a className="btnx sm" href={editUrl(v.job, clip.name)} target="_blank" rel="noreferrer">Open clip</a>}
         <span className="lv-grow" />
-        {!b && <button className="btnx sm ghost" onClick={() => onHide(!p.hidden)}>{p.hidden ? "Restore" : "Hide"}</button>}
+        {!b && !clip && <button className="btnx sm ghost" onClick={onHide}>Hide</button>}
       </div>
     </div>
   );

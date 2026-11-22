@@ -1,9 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { change, openCrop, openTab, playHook, renameClip, saveDraft, setMode, setSetting, toggleHook } from "@/lib/actions";
+import { change, openCrop, openTab, playHook, saveDraft, setSetting, toggleHook } from "@/lib/actions";
 import { LAYOUTS } from "@/lib/constants";
 import { vMax, vMin } from "@/lib/engine";
-import { estLen } from "@/lib/plan";
 import { setEd, useEd } from "@/lib/store";
 import type { Tab } from "@/lib/types";
 import { clamp, fmt } from "@/lib/util";
@@ -12,9 +11,9 @@ import { I } from "./Icons";
 // The look (word captions, white title box, zoom into the clip, pause trimming, punch-in) is fixed: the editor only
 // changes what differs per clip.
 const RAIL: [Tab, string, React.ReactNode][] = [
-  ["text", "Title", I.text], ["layout", "Layout", I.layout], ["trim", "Trim", I.scissors], ["export", "Export", I.upload],
+  ["text", "Title", I.text], ["layout", "Layout", I.layout], ["trim", "Trim", I.scissors],
 ];
-const TITLES: Record<Tab, string> = { text: "Title", layout: "Layout", trim: "Trim and hook", export: "Export" };
+const TITLES: Record<Tab, string> = { text: "Title", layout: "Layout", trim: "Trim and hook" };
 
 export function Rail() {
   const tab = useEd(s => s.tab);
@@ -32,12 +31,10 @@ function Card({ k, v, on, title, desc, wide, onPick }: { k: string; v: string; o
 
 export function Panel() {
   const tab = useEd(s => s.tab), P = useEd(s => s.P), S = useEd(s => s.S);
-  const render = useEd(s => s.render), lastRender = useEd(s => s.lastRender);
   const [titleDraft, setTitleDraft] = useState("");
   useEffect(() => { if (S) setTitleDraft(S.title); }, [S?.title, tab]);   // eslint-disable-line react-hooks/exhaustive-deps
   if (!tab || !P || !S) return <aside id="panel" />;
-  const len = estLen(P, S), off = P.video.offset;
-  const status = render?.status || lastRender;
+  const off = P.video.offset;
 
   const body = (() => {
     switch (tab) {
@@ -83,20 +80,6 @@ export function Panel() {
             : <div style={{ color: "var(--mute)", fontSize: 13 }}>For a silent visual moment (a backflip, a reveal) that pause trimming would cut</div>}
         </div></div>
       </>);
-      case "export": return (<>
-        <div className="field"><label>File name</label>
-          <NameField name={P.name} />
-          <div style={{ color: "var(--mute)", fontSize: 12, marginTop: 6 }}>edits/<b>{P.name}</b>.mp4 · the same name replaces that clip in the post queue</div>
-        </div>
-        <div className={"note" + (len < 12 || len > 25 ? " warn" : "")}>About {len.toFixed(1)} s (loud pauses are kept at render, so it can come out a little longer). Reactions: 12–25 s.</div>
-        {status && (<>
-          <div className={"note" + (status.state === "error" ? " warn" : "")} style={status.state === "done" ? { color: "var(--lime)" } : undefined}>
-            {status.state === "running" ? `Rendering · ${status.stage} · ${Math.round(status.elapsed)} s` : status.state === "done" ? `✓ Done in ${Math.round(status.elapsed)} s` : "✕ Failed"}
-          </div>
-          {!!status.log?.length && <div className="log">{status.log.join("\n")}</div>}
-        </>)}
-        {P.rendered && <div className="note">Last render: {P.rendered.dur.toFixed(1)} s · {new Date(P.rendered.updated * 1000).toLocaleString()} <button className="btnx sm" style={{ marginLeft: 6 }} onClick={() => setMode("rendered")}>View</button></div>}
-      </>);
     }
   })();
 
@@ -118,10 +101,4 @@ function NumPair({ a, b, onChange }: { a: number; b: number; onChange: (a: numbe
       <input className="inp" type="number" step={0.05} value={y} onChange={e => setY(e.target.value)} onBlur={commit} onKeyDown={e => e.key === "Enter" && commit()} />
     </div>
   );
-}
-function NameField({ name }: { name: string }) {
-  const [v, setV] = useState(name);
-  useEffect(() => setV(name), [name]);
-  const commit = () => { if (v.trim() !== name && renameClip(v.trim()) === false) setV(name); };
-  return <input className="inp" type="text" value={v} onChange={e => setV(e.target.value)} onBlur={commit} onKeyDown={e => e.key === "Enter" && commit()} />;
 }

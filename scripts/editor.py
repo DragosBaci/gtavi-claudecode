@@ -476,13 +476,18 @@ def queue_data():
     st, skips = U.jload(U.STATE, {}), U.jload(U.SKIPS, {})
     added = {x["id"] for x in U.jload(U.ADDED, [])}
     items = []
+    C = campaigns_mod()
+    named = {c["id"] for c in C.load()["campaigns"] if not c.get("any_gta")}
     for it in U.items().values():
         job, _, name = it["id"].partition("/")
         mp4 = JOBS / job / "edits" / f"{name}.mp4"
         items.append({**{k: it.get(k) for k in ("id", "rank", "title", "hook", "why", "warnings", "creator", "duration", "format",
-                                                 "source_url", "source_title", "platforms", "rank_reason", "hold", "pinned")},
+                                                 "source_url", "source_title", "platforms", "rank_reason", "hold", "pinned", "target")},
                       "job": job, "name": name, "video": rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}" if mp4.exists() else None,
-                      "state": st.get(it["id"], {}), "skipped": skips.get(it["id"]), "added": it["id"] in added})
+                      "state": st.get(it["id"], {}), "skipped": skips.get(it["id"]), "added": it["id"] in added,
+                      # the campaigns this clip is filed under: the one it was made for, then its creator's (named) ones
+                      "cats": list(dict.fromkeys([x for x in [it.get("target")] if x] +
+                                                 [m["id"] for m in C.match(it["id"], only_joined=False) if m["eligible"] and m["id"] in named]))})
     last = max((v.get("updated", 0) for d in st.values() for v in d.values() if v.get("posted")), default=0)
     log = []
     if U.LOG.exists():
@@ -492,7 +497,10 @@ def queue_data():
     if pn.get("state") == "running" and not pn["running"]:
         pn["state"] = "stopped"
     pn["log"] = tail(U.UP / "postnow.log", 16, noise=False) if pn.get("id") else []
-    return {"items": items, "max_dur": U.MAX_DUR, "postnow": pn,
+    filed = {k for i in items for k in i["cats"]}
+    camps = [{k: c.get(k) for k in ("id", "name", "rate_per_1k", "pool", "joined", "platforms", "url")}
+             for c in C.load()["campaigns"] if c["id"] in filed and "ended" not in (c.get("warning") or "")]
+    return {"items": items, "max_dur": U.MAX_DUR, "postnow": pn, "campaigns": camps,
             "account": U.jload(U.ACCOUNT, None),
             "limits": {"tiktok": 2200, "yt_title": 100, "yt_desc": 5000, "instagram": 2200, "x": 280},
             "last_post": last or None, "log": log}
@@ -599,7 +607,7 @@ def queue_post(path, body):
 # ------------------------------------------------------------------ extract: YouTube video -> pipeline -> Claude's picks -> clips
 
 # ------------------------------------------------------------------ campaigns: paid clipping campaigns (campaigns.py)
-# The Earn page: join a campaign, paste its rules (Claude structures them), add its overlay, see which clips qualify,
+# The Campaigns page: join a campaign, paste its rules (Claude structures them), add its overlay, see which clips qualify,
 # what was submitted, real views, an estimate of what they earn and real payouts. "Submit with Claude" runs
 # submit_now.py (Claude in Chrome, the campaign-submit skill).
 
@@ -613,6 +621,41 @@ def campaigns_mod():
     return campaigns
 
 
+def campaign_tracked(C, U, items):
+    """Per campaign, the clips made for it (a campaign run tags them) and the queued clips of its creators (named ones):
+    each with where it's posted, its views there (scoreboard.csv) and its submission status."""
+    st = U.jload(U.STATE, {})
+    try:
+        import stats
+        board = stats.load_board()
+    except Exception:
+        board = {}
+    subs = {(s["clip"], s["platform"], s["campaign"]): s["status"] for s in C.subs()}
+    named = {c["id"] for c in C.load()["campaigns"] if not c.get("any_gta")}   # "any GTA 6" campaigns would take every clip
+    out = {}
+    for cid, it in items.items():
+        ids = {it.get("target")} | {m["id"] for m in C.match(cid, only_joined=False) if m["eligible"] and m["id"] in named}
+        job, _, name = cid.partition("/")
+        mp4 = JOBS / job / "edits" / f"{name}.mp4"
+        for k in ids - {None}:
+            posts = []
+            for plat, s in (st.get(cid) or {}).items():
+                if not s.get("posted"):
+                    continue
+                row = board.get((cid, plat)) or {}
+                try:
+                    views = int(float(row.get("views_now") or 0)) if row else None
+                except ValueError:
+                    views = None
+                posts.append({"platform": plat, "url": s.get("url"), "at": s.get("updated"), "views": views,
+                              "sub": subs.get((cid, plat, k))})
+            out.setdefault(k, []).append({"id": cid, "title": it.get("title"), "creator": it.get("creator"),
+                                          "duration": it.get("duration"), "hold": bool(it.get("hold")),
+                                          "video": rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}" if mp4.exists() else None,
+                                          "posts": posts, "made_for": it.get("target") == k})
+    return out
+
+
 def campaigns_data():
     C, U = campaigns_mod(), uploader()
     items = U.items()
@@ -622,11 +665,13 @@ def campaigns_data():
             k = counts.setdefault(m["id"], {"eligible": 0, "fix": 0})
             k["eligible" if m["eligible"] else "fix"] += 1
     earn = {e["id"]: e for e in C.earnings()}
+    tracked = campaign_tracked(C, U, items)
     out = []
     for c in C.load()["campaigns"]:
         f = C.overlay_file(c)
         out.append({**c, "overlay": f"/api/campaigns/overlay?id={c['id']}&v={int(f.stat().st_mtime)}" if f else None,
-                    "clips": counts.get(c["id"], {"eligible": 0, "fix": 0}), "earn": earn.get(c["id"])})
+                    "clips": counts.get(c["id"], {"eligible": 0, "fix": 0}), "earn": earn.get(c["id"]),
+                    "tracked": tracked.get(c["id"], [])})
     out.sort(key=lambda c: (not c.get("joined"), -(c.get("rate_per_1k") or 0)))
     subs = []
     for e in sorted(C.subs(), key=lambda e: -e.get("updated", 0))[:200]:
@@ -837,8 +882,8 @@ def extract_start(body):
     camp = str(body.get("campaign") or "")
     if camp:   # make these clips for a joined paid campaign: picked by its rules, rendered with its overlay
         c = campaigns_mod().get(camp)
-        if not c or not c.get("joined"):
-            raise ValueError("join that campaign first (Earn page)")
+        if not c or c.get("status", "live") != "live":
+            raise ValueError("unknown or ended campaign")
         cmd += ["--campaign", camp]
     EXR.mkdir(parents=True, exist_ok=True)
     with open(EXR / "last_start.log", "w") as log:
@@ -1294,7 +1339,11 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/extract":
                 return self.send_json({"runs": extract_runs(), "trending": trending(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude")),
                                        "campaigns": [{"id": c["id"], "name": c["name"], "creators": c.get("creators") or [], "any_gta": bool(c.get("any_gta")),
-                                                      "rate": c.get("rate_per_1k"), "pool": c.get("pool")} for c in campaigns_mod().joined()]})
+                                                      "rate": c.get("rate_per_1k"), "pool": c.get("pool"), "joined": bool(c.get("joined")),
+                                                      "youtube": "youtube" in (c.get("platforms") or [])}
+                                                     for c in sorted(campaigns_mod().load()["campaigns"],
+                                                                     key=lambda c: (not c.get("joined"), "youtube" not in (c.get("platforms") or []), -(c.get("rate_per_1k") or 0.9)))
+                                                     if c.get("status", "live") == "live" and "ended" not in (c.get("warning") or "")]})
             if u.path == "/api/campaigns":
                 return self.send_json(campaigns_data())
             if u.path == "/api/campaigns/overlay":
