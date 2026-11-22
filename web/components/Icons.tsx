@@ -38,6 +38,7 @@ export const I = {
 export const LAYOUT_ICON: Record<string, ReactNode> = {
   fill: <S><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5M4 4l6 6M20 4l-6 6M20 20l-6-6M4 20l6-6" /></S>,
   blur: <S><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5M4 4l5 5M20 4l-5 5M20 20l-5-5M4 20l5-5" /></S>,
+  track: <S><rect x="6" y="5" width="12" height="14" rx="2" /><circle cx="12" cy="12" r="2.5" /><path d="M12 3v2M12 19v2M3 12h3M18 12h3" /></S>,
   react: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 11h16" /></S>,
   facecam: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 9h16" /></S>,
   split: <S><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 12h16M8 16l2 2 2-2 2 2 2-2" /></S>,

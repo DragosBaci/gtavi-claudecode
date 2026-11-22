@@ -2,7 +2,6 @@
 import { useEffect, useRef, useState } from "react";
 import { act, doUndo, loadClips, openTab, toggleHook } from "@/lib/actions";
 import { E, seek, startLoop, tNow, togglePlay } from "@/lib/engine";
-import { initMe, startPresence, trackMouse } from "@/lib/presence";
 import { ed, setEd, useEd } from "@/lib/store";
 import Bottom from "./Bottom";
 import ClipHeader from "./ClipHeader";
@@ -20,8 +19,7 @@ export default function Editor() {
   useEffect(() => {
     E.v = v.current; E.v2 = v2.current;
     E.v!.addEventListener("ended", () => setEd({ playing: false }));
-    initMe(); setReady(true);
-    const offMouse = trackMouse(), offPresence = startPresence();
+    setReady(true);
     Promise.all([document.fonts.load("900 40px Montserrat"), document.fonts.load("800 40px Montserrat")]).catch(() => {})
       .finally(() => { loadClips(true).catch(e => setEd({ loading: e.message })); startLoop(); });
 
@@ -43,7 +41,7 @@ export default function Editor() {
     };
     const closeMenus = () => { if (ed().menu) setEd({ menu: null }); };
     document.addEventListener("keydown", key); document.addEventListener("click", closeMenus);
-    return () => { offMouse(); offPresence(); document.removeEventListener("keydown", key); document.removeEventListener("click", closeMenus); };
+    return () => { document.removeEventListener("keydown", key); document.removeEventListener("click", closeMenus); };
   }, []);
 
   return (
@@ -65,7 +63,6 @@ export default function Editor() {
       </div>
       <SelectionBar />
       <CropModal />
-      <div id="cursors" />
       <Toast />
       <video ref={v} playsInline preload="auto" style={{ display: "none" }} />
       <video ref={v2} playsInline preload="auto" muted style={{ display: "none" }} />

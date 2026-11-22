@@ -19,9 +19,9 @@ from common import ROOT, ffprobe, load_json, save_json, tool  # noqa: E402
 JOBS = (ROOT / "jobs").resolve()
 WEB = (HERE.parent / "web" / "out").resolve()   # the Next.js editor UI, built with `npm run build` in tool/web
 FONTS = (HERE.parent / "fonts").resolve()
-FILLERS = (ROOT / "fillers").resolve()   # brainrot gameplay for the Split-with-filler layout (Subway Surfers, ramps...)
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}$")
-TRANSITION_NAMES = ("zoom", "whip", "slide", "fade", "pixel", "circle", "dissolve", "flash", "cut", "rewind")
+LAYOUTS = ("react", "track", "fill", "blur")   # Split, Focus, Fill, Fit
+LEGACY_LAYOUT = {"facecam": "react", "split": "track"}   # removed layouts: older clips reopen in the nearest one
 RENDERS = {}           # id -> {"proc", "log", "job", "name", "started", "by"}
 PORT = 8766
 LOCK = threading.Lock()
@@ -92,7 +92,11 @@ def find_video(d, meta):
     """(video path, offset in source seconds, set, pick n) for a rendered clip."""
     args = meta.get("args") or {}
     if meta.get("video") and (ROOT / meta["video"]).exists():
-        return ROOT / meta["video"], meta.get("video_offset", 0), args.get("set", "candidates_audit"), args.get("pick")
+        v = (ROOT / meta["video"]).resolve()
+        if JOBS in v.parents:
+            return ROOT / meta["video"], meta.get("video_offset", 0), args.get("set", "candidates_audit"), args.get("pick")
+        if (d / "source.mp4").exists() and not meta.get("video_offset"):   # a local file, now linked into the job
+            return d / "source.mp4", 0, args.get("set", "candidates_audit"), args.get("pick")
     # clips rendered before cut.py saved its options: the pick whose downloaded section covers the clip
     s, e = meta.get("start"), meta.get("end")
     for set_ in ("candidates_audit", "candidates"):
@@ -184,17 +188,11 @@ def project(job, name=None, set_=None, pick=None):
         "end": args.get("end") if args.get("end") is not None else (round(meta["end"] + 0.3, 2) if meta else p.get("end")),
         "tease": tease, "keep": rng(args.get("keep")), "drop": rng(args.get("drop")),
         "cam": args.get("cam") if args.get("cam") not in (None, "auto") else (meta.get("cam") or "auto"),
-        "layout": meta.get("layout") or args.get("layout") or "react",
+        "layout": LEGACY_LAYOUT.get(meta.get("layout") or args.get("layout") or "react", meta.get("layout") or args.get("layout") or "react"),
         "title": meta.get("title") if meta else p.get("title", ""),
-        "title_style": args.get("title_style", "box"), "captions": args.get("captions", "word"),
-        "title_secs": float(args.get("title_secs") or 0),   # 0 = the title stays the whole clip
-        "transition": args.get("transition", "zoom"), "tighten": args.get("tighten", 0.45),
-        "keep_after_tease": bool(args.get("keep_after_tease")),
-        "punch": not args.get("no_punch", False), "trim": not args.get("no_trim", False),
-        # brainrot layout: keep the filler the last render used (a "random" pick stays the same video)
-        "filler": Path(meta["filler"]).stem if meta.get("filler") else (args.get("filler") or "random"),
-        "split": float(args.get("split") or 0.5),
-        "filler_start": meta.get("filler_start") if meta.get("filler_start") is not None else args.get("filler_start"),
+        # the look is fixed (what cut.py renders by default), so the preview always matches the render
+        "title_style": "box", "captions": "word", "title_secs": 0, "transition": "zoom", "tighten": 0.45,
+        "keep_after_tease": bool(args.get("keep_after_tease")), "punch": True, "trim": True,
     }
     if meta and not args and meta.get("tease") and meta.get("end", 0) > meta["tease"][1] + 1.2:
         st["keep_after_tease"] = True   # older renders: it kept playing after the hook
@@ -205,21 +203,9 @@ def project(job, name=None, set_=None, pick=None):
     titles = p.get("titles") or ([st["title"]] if st["title"] else [])
     return {"job": job, "name": name or f"e_{(p.get('tag') or 'pick' + str(pick)).lower()}", "set": set_, "pick": pick,
             "video": {"url": rel_media(video), "offset": off, **v}, "words": words, "state": st, "titles": titles,
-            "game_x": meta.get("game_x"), "rendered": rendered, "is_new": not meta, "fillers": fillers(),
+            "game_x": meta.get("game_x"), "focus": meta.get("focus"), "rendered": rendered, "is_new": not meta,
             "source": {"title": meta.get("source_title") or load_json(d / "info.json").get("title"),
                        "channel": meta.get("source_channel") or load_json(d / "info.json").get("channel")}}
-
-
-def fillers():
-    """The videos in fillers/ for the brainrot layout."""
-    out = []
-    for f in sorted(FILLERS.glob("*.mp4")) if FILLERS.is_dir() else []:
-        try:
-            v = probe(f)
-        except Exception:
-            continue
-        out.append({"name": f.stem, "url": "/fillers/" + f.name, "dur": v["dur"], "w": v["w"], "h": v["h"]})
-    return out
 
 
 def strip(job, video_url, n=0):
@@ -249,29 +235,27 @@ def num(x, lo=-1e9, hi=1e9):
 
 
 def render(body):
+    """Render from the editor. The look is fixed (word captions, white title box, zoom into the clip, pauses over
+    0.45 s cut, punch-in): the editor only sets what changes per clip: the moment, hook, cuts, title, layout, webcam."""
     job, name = body["job"], body["name"]
     d = job_dir(job)
     if not NAME_RE.match(name):
         raise ValueError("clip name: letters, digits, _ and - only")
     s = body["state"]
     layout = s["layout"]
-    if layout not in ("react", "fill", "blur", "facecam", "split"):
+    if layout not in LAYOUTS:
         raise ValueError("layout")
     cmd = [sys.executable, str(HERE / "cut.py"), str(d.relative_to(ROOT)), "--set", str(body["set"]),
            "--pick", str(int(body["pick"])), "--layout", layout, "--name", name,
            "--start", f"{num(s['start']):.3f}", "--end", f"{num(s['end']):.3f}",
-           "--title", str(s.get("title", ""))[:120], "--title-style", "outline" if s.get("title_style") == "outline" else "box",
-           "--title-secs", f"{num(s.get('title_secs') or 0, 0, 600):.2f}",
-           "--captions", s["captions"] if s.get("captions") in ("word", "bubble", "none") else "word",
-           "--transition", s["transition"] if s.get("transition") in TRANSITION_NAMES else "zoom",
-           "--tighten", f"{num(s.get('tighten', 0.45), 0, 5):.2f}"]
+           "--title", str(s.get("title", ""))[:120]]
     if s.get("tease"):
         a, b = num(s["tease"][0]), num(s["tease"][1])
         cmd += ["--tease", f"{a:.3f}:{b:.3f}"]
     else:
         cmd += ["--no-tease"]
     cam = s.get("cam", "auto")
-    if layout in ("react", "facecam") and cam != "auto":
+    if layout == "react" and cam != "auto":
         parts = [num(x, 0, 1) for x in cam.split(":")]
         if len(parts) != 4 or parts[2] <= 0.01 or parts[3] <= 0.01:
             raise ValueError("cam box")
@@ -281,19 +265,8 @@ def render(body):
     for k in ("keep", "drop"):
         for a, b in s.get(k) or []:
             cmd += [f"--{k}", f"{num(a):.3f}:{num(b):.3f}"]
-    if layout == "split":
-        f = str(s.get("filler") or "random")
-        if f != "random" and not (FILLERS / f"{f}.mp4").is_file():
-            raise ValueError(f"no filler video fillers/{f}.mp4")
-        cmd += ["--filler", f, "--split", f"{num(s.get('split', 0.5), 0.3, 0.7):.2f}"]
-        if s.get("filler_start") is not None:   # the exact spot the editor previewed
-            cmd += ["--filler-start", f"{num(s['filler_start'], 0, 1e6):.2f}"]
     if s.get("keep_after_tease"):
         cmd += ["--keep-after-tease"]
-    if not s.get("punch", True):
-        cmd += ["--no-punch"]
-    if not s.get("trim", True):
-        cmd += ["--no-trim"]
     rid = f"{int(time.time() * 1000)}"
     log = d / "editor" / f"render_{name}_{rid}.log"
     log.parent.mkdir(exist_ok=True)
@@ -319,6 +292,12 @@ def render_status(rid):
     if code == 0:
         mp4 = JOBS / r["job"] / "edits" / f"{r['name']}.mp4"
         out = rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}"
+        if not r.get("queued"):   # a clip you rendered by hand goes straight into the posting queue
+            r["queued"] = True
+            try:
+                uploader().enqueue(r["job"], r["name"], why="rendered in the editor")
+            except (SystemExit, Exception):
+                pass
     stage = "starting"
     for l in lines:
         if l.startswith("align:"): stage = "captions aligned"
@@ -351,88 +330,6 @@ def wave(job, video_url):
     out.write_text(json.dumps(res))
     return res
 
-
-# ------------------------------------------------------------------ presence: live cursors, shared edits, agent steps
-# Every open editor window posts its cursor ~7 times a second. Windows on the same clip see each other's cursors,
-# share the latest edit state (last writer wins), and pick up agent jobs: scripted edits (POST /api/agent) that the
-# page performs with a visible "Claude" cursor. Kept in memory; restarting the server clears it.
-
-PRES, SHARED, AGENT = {}, {}, {}
-
-
-def clip_render(clip):
-    job, _, name = clip.partition("/")
-    for rid, r in sorted(RENDERS.items(), reverse=True):
-        if r["job"] == job and r["name"] == name:
-            st = render_status(rid)
-            if st["state"] == "running" or time.time() - r["started"] - st["elapsed"] < 0.5:
-                return {"id": rid, "state": st["state"], "stage": st["stage"], "elapsed": st["elapsed"], "by": r.get("by")}
-            return {"id": rid, "state": st["state"], "stage": st["stage"], "elapsed": st["elapsed"], "by": r.get("by")}
-    return None
-
-
-def presence(body):
-    now = time.time()
-    sid = str(body.get("sid", ""))[:40]
-    clip = str(body.get("clip", ""))[:200]
-    if not sid:
-        raise ValueError("sid")
-    with LOCK:
-        me = PRES.setdefault(sid, {})
-        me.update(sid=sid, name=str(body.get("name", "?"))[:24], color=str(body.get("color", "#ffffff"))[:16], clip=clip,
-                  cursor=body.get("cursor"), action=str(body.get("action") or "")[:80] or None, at=now)
-        for g in body.get("ghosts") or []:   # agent cursors this window is animating
-            gid = "ghost:" + str(g.get("sid", ""))[:40]
-            PRES[gid] = {"sid": gid, "name": str(g.get("name", "Claude"))[:24], "color": str(g.get("color", "#d97757"))[:16],
-                         "clip": clip, "cursor": g.get("cursor"), "action": str(g.get("action") or "")[:80] or None,
-                         "at": now, "owner": sid, "ghost": True}
-        if body.get("state") is not None:
-            cur = SHARED.get(clip, {"v": 0})
-            SHARED[clip] = {"v": cur["v"] + 1, "state": body["state"], "by": sid, "name": me["name"],
-                            "action": str(body.get("state_action") or "")[:80], "at": now}
-        for s_ in [s_ for s_, p in PRES.items() if now - p["at"] > 30]:
-            PRES.pop(s_, None)
-        peers = [{k: p.get(k) for k in ("sid", "name", "color", "cursor", "action", "ghost")}
-                 for s_, p in PRES.items() if s_ != sid and p.get("clip") == clip and now - p["at"] < 4 and p.get("owner") != sid]
-        sh = SHARED.get(clip)
-        shared = dict(sh) if sh and sh["v"] > int(body.get("known_v") or 0) and sh["by"] != sid else None
-        jobs = []
-        for j in AGENT.get(clip, []):
-            if j["id"] in (body.get("agent_done") or []):
-                j["state"] = "done"
-            if j["state"] == "queued":
-                j["state"], j["claimed_by"] = "running", sid
-                jobs.append(j)
-    return {"peers": peers, "shared": shared, "v": sh["v"] if sh else 0, "agent": jobs, "render": clip_render(clip)}
-
-
-def agent_post(body):
-    clip = str(body.get("clip", ""))
-    job, _, name = clip.partition("/")
-    job_dir(job)
-    if not NAME_RE.match(name):
-        raise ValueError("clip must be <job>/<clip name>")
-    steps = body.get("steps")
-    if not isinstance(steps, list) or not steps or len(steps) > 60:
-        raise ValueError("steps: a list of 1-60 steps")
-    j = {"id": f"a{int(time.time() * 1000)}", "name": str(body.get("name") or "Claude")[:24], "steps": steps,
-         "state": "queued", "at": time.time()}
-    with LOCK:
-        AGENT.setdefault(clip, []).append(j)
-        AGENT[clip] = AGENT[clip][-20:]
-    open_now = any(p.get("clip") == clip and time.time() - p["at"] < 4 and not p.get("ghost") for p in PRES.values())
-    return {"id": j["id"], "state": j["state"], "editor_open": open_now,
-            "note": None if open_now else f"open http://127.0.0.1:{PORT}/edit?job={job}&name={name} to watch it run"}
-
-
-def agent_status(clip):
-    return [{k: j.get(k) for k in ("id", "name", "state", "at")} for j in AGENT.get(clip, [])]
-
-
-# ------------------------------------------------------------------ live: watch.py driven from the Live page
-# watch.py writes jobs/.live/status.json and reads commands from jobs/.live/cmd/, so the page also sees (and can
-# stop) a watch.py started from the terminal. Started from here it runs in its own session: restarting this
-# server doesn't stop the recording.
 
 LIVE = JOBS / ".live"
 WATCH = {"proc": None}
@@ -562,33 +459,6 @@ def live_top():
 
 # ------------------------------------------------------------------ rendered clips (Home, Queue)
 
-def rendered_clips(limit=80, skip_ids=()):
-    """Rendered clips (jobs/<job>/edits/<name>.mp4) across all jobs, newest first."""
-    out = []
-    for d in JOBS.iterdir():
-        if not d.is_dir() or d.name.startswith(".") or not (d / "edits").is_dir():
-            continue
-        info = None
-        for mp4 in (d / "edits").glob("*.mp4"):
-            cid = f"{d.name}/{mp4.stem}"
-            if mp4.name.startswith(".") or cid in skip_ids or not NAME_RE.match(mp4.stem):
-                continue
-            try:
-                meta = load_json(mp4.with_suffix(".json")) if mp4.with_suffix(".json").exists() else {}
-                info = info if info is not None else (load_json(d / "info.json") if (d / "info.json").exists() else {})
-            except (json.JSONDecodeError, OSError):
-                continue
-            out.append({"id": cid, "job": d.name, "name": mp4.stem, "title": meta.get("title") or meta.get("hook") or mp4.stem,
-                        "layout": meta.get("layout"), "updated": mp4.stat().st_mtime,
-                        "creator": meta.get("source_channel") or info.get("channel") or info.get("uploader"),
-                        "video": rel_media(mp4) + f"?v={int(mp4.stat().st_mtime)}"})
-    return sorted(out, key=lambda x: -x["updated"])[:limit]
-
-
-# ------------------------------------------------------------------ queue: the posting queue (queue/ in the clip desk folder)
-# One source of truth with the auto-uploader: scripts/uploader.py merges the clips added here (added.json), text
-# edited here (overrides.json) and an optional hand-ranked queue.json; state.json is shared with the uploader.
-
 QDIR = ROOT / "queue"
 _upl = {}
 PLATS = ("tiktok", "youtube", "instagram", "x")
@@ -617,21 +487,15 @@ def queue_data():
     log = []
     if U.LOG.exists():
         log = [json.loads(l) for l in U.LOG.read_text(encoding="utf-8").splitlines()[-12:] if l.strip()]
-    rr = U.jload(U.UP / "rerank.json", {})
-    rr["running"] = rr.get("state") == "running" and RERANK["proc"] is not None and RERANK["proc"].poll() is None
-    rr["order_at"] = U.jload(QDIR / "order.json", {}).get("at")
     pn = U.jload(U.UP / "postnow.json", {})
     pn["running"] = pn.get("state") == "running" and pid_alive(pn.get("pid"))
     if pn.get("state") == "running" and not pn["running"]:
         pn["state"] = "stopped"
     pn["log"] = tail(U.UP / "postnow.log", 16, noise=False) if pn.get("id") else []
-    return {"items": items, "other": rendered_clips(80, {x["id"] for x in items}), "max_dur": U.MAX_DUR, "rerank": rr, "postnow": pn,
+    return {"items": items, "max_dur": U.MAX_DUR, "postnow": pn,
             "account": U.jload(U.ACCOUNT, None),
             "limits": {"tiktok": 2200, "yt_title": 100, "yt_desc": 5000, "instagram": 2200, "x": 280},
             "last_post": last or None, "log": log}
-
-
-RERANK = {"proc": None}
 
 
 def queue_post(path, body):
@@ -642,14 +506,6 @@ def queue_post(path, body):
             raise ValueError("the account name is empty")
         hs = [h for h in re.split(r"[\s,]+", str(body.get("handles", ""))) if h][:6]
         U.jsave(U.ACCOUNT, {"name": nm, "handles": [h.lstrip("@").lower()[:40] for h in hs]})
-        return {"ok": True}
-    if path == "/api/queue/rerank":   # Claude orders the unposted clips (scripts/rerank.py -> queue/order.json)
-        if RERANK["proc"] is not None and RERANK["proc"].poll() is None:
-            raise ValueError("already re-ranking")
-        U.UP.mkdir(parents=True, exist_ok=True)
-        U.jsave(U.UP / "rerank.json", {"state": "running", "started": time.time()})
-        RERANK["proc"] = subprocess.Popen([sys.executable, str(HERE / "rerank.py"), *([] if body.get("all", True) else ["--queued-only"])], cwd=str(ROOT),
-                                          stdout=open(U.UP / "rerank.log", "w"), stderr=subprocess.STDOUT)
         return {"ok": True}
     cid = str(body.get("id", ""))
     job, _, name = cid.partition("/")
@@ -733,10 +589,7 @@ def queue_post(path, body):
             U.unskip(cid)
         return {"ok": True}
     if path == "/api/queue/remove":
-        added = U.jload(U.ADDED, [])
-        if not any(x["id"] == cid for x in added):
-            raise ValueError("this clip comes from queue/queue.json (a hand-ranked list): remove it there, or skip it for the uploader")
-        U.jsave(U.ADDED, [x for x in added if x["id"] != cid])
+        U.jsave(U.ADDED, [x for x in U.jload(U.ADDED, []) if x["id"] != cid])
         removed = U.jload(QDIR / "removed.json", [])   # so "rank all" doesn't put it back
         U.jsave(QDIR / "removed.json", sorted(set(removed) | {cid}))
         return {"ok": True}
@@ -744,6 +597,139 @@ def queue_post(path, body):
 
 
 # ------------------------------------------------------------------ extract: YouTube video -> pipeline -> Claude's picks -> clips
+
+# ------------------------------------------------------------------ campaigns: paid clipping campaigns (campaigns.py)
+# The Earn page: join a campaign, paste its rules (Claude structures them), add its overlay, see which clips qualify,
+# what was submitted, real views, an estimate of what they earn and real payouts. "Submit with Claude" runs
+# submit_now.py (Claude in Chrome, the campaign-submit skill).
+
+SUBMIT = {"proc": None}
+STATS = {"thread": None, "at": None}
+CAMP_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
+
+
+def campaigns_mod():
+    import campaigns
+    return campaigns
+
+
+def campaigns_data():
+    C, U = campaigns_mod(), uploader()
+    items = U.items()
+    counts = {}   # campaign id -> {"eligible": n, "fix": n}
+    for cid in items:
+        for m in C.match(cid, only_joined=False):
+            k = counts.setdefault(m["id"], {"eligible": 0, "fix": 0})
+            k["eligible" if m["eligible"] else "fix"] += 1
+    earn = {e["id"]: e for e in C.earnings()}
+    out = []
+    for c in C.load()["campaigns"]:
+        f = C.overlay_file(c)
+        out.append({**c, "overlay": f"/api/campaigns/overlay?id={c['id']}&v={int(f.stat().st_mtime)}" if f else None,
+                    "clips": counts.get(c["id"], {"eligible": 0, "fix": 0}), "earn": earn.get(c["id"])})
+    out.sort(key=lambda c: (not c.get("joined"), -(c.get("rate_per_1k") or 0)))
+    subs = []
+    for e in sorted(C.subs(), key=lambda e: -e.get("updated", 0))[:200]:
+        it = items.get(e["clip"]) or {}
+        subs.append({**e, "title": it.get("title") or e["clip"]})
+    sb = U.jload(U.UP / "submit.json", {})
+    sb["running"] = sb.get("state") == "running" and pid_alive(sb.get("pid"))
+    if sb.get("state") == "running" and not sb["running"]:
+        sb["state"] = "stopped"
+    sb["log"] = tail(U.UP / "submit.log", 16, noise=False) if sb.get("started") else []
+    tot = {"estimate": round(sum((e.get("estimate") or 0) for e in earn.values()), 2),
+           "paid": round(sum(e.get("paid") or 0 for e in earn.values()), 2),
+           "views": sum(e.get("views") or 0 for e in earn.values()),
+           "to_submit": sum(1 for e in C.subs() if e["status"] == "to_submit")}
+    return {"campaigns": out, "submissions": subs, "payouts": C.payouts()[-30:], "submit": sb, "totals": tot,
+            "stats": {"running": bool(STATS["thread"] and STATS["thread"].is_alive()), "at": STATS["at"]}}
+
+
+def campaigns_post(path, body):
+    C = campaigns_mod()
+    if path == "/api/campaigns/update":
+        cid = str(body.get("id", ""))
+        if not CAMP_ID.match(cid) or not C.get(cid):
+            raise ValueError("unknown campaign")
+        kw = {}
+        if "joined" in body:
+            kw["joined"] = bool(body["joined"])
+        if "submit_url" in body:
+            u = str(body["submit_url"] or "").strip()
+            if u and not re.match(r"^https://", u):
+                raise ValueError("the submit page must be an https:// link")
+            kw["submit_url"] = u or None
+        if "rules_text" in body:
+            kw["rules_text"] = str(body["rules_text"] or "")[:20000]
+        C.update(cid, **kw)
+        if kw.get("rules_text", "").strip():   # Claude turns the pasted rules into settings, in the background
+            C.update(cid, parse_state="running")
+            subprocess.Popen([sys.executable, str(HERE / "campaigns.py"), "parse", cid], cwd=str(ROOT),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True}
+    if path == "/api/campaigns/overlay":   # the campaign's logo / overlay, as a PNG data URL
+        import base64
+        cid = str(body.get("id", ""))
+        if not CAMP_ID.match(cid) or not C.get(cid):
+            raise ValueError("unknown campaign")
+        if body.get("remove"):
+            (C.FILES / cid / "overlay.png").unlink(missing_ok=True)
+            return {"ok": True}
+        data = str(body.get("data", ""))
+        if not data.startswith("data:image/png;base64,"):
+            raise ValueError("the overlay must be a PNG (a transparent background works best)")
+        raw = base64.b64decode(data.split(",", 1)[1])
+        if not raw.startswith(b"\x89PNG") or len(raw) > 12_000_000:
+            raise ValueError("not a PNG, or over 12 MB")
+        (C.FILES / cid).mkdir(parents=True, exist_ok=True)
+        (C.FILES / cid / "overlay.png").write_bytes(raw)
+        return {"ok": True}
+    if path == "/api/campaigns/submission":
+        C.set_status(str(body.get("clip")), str(body.get("platform")), str(body.get("campaign")), str(body.get("status")),
+                     str(body.get("note") or ""))
+        return {"ok": True}
+    if path == "/api/campaigns/payout":
+        cid = str(body.get("campaign", ""))
+        if not C.get(cid):
+            raise ValueError("unknown campaign")
+        amount = float(body.get("amount") or 0)
+        if not 0 < amount < 1_000_000:
+            raise ValueError("amount")
+        C.add_payout(cid, amount, str(body.get("note") or "")[:200])
+        return {"ok": True}
+    if path == "/api/campaigns/stats":   # read the posts' real views now (scoreboard.csv)
+        if not (STATS["thread"] and STATS["thread"].is_alive()):
+            def go():
+                try:
+                    import stats
+                    stats.refresh()
+                finally:
+                    STATS["at"] = time.time()
+            STATS["thread"] = threading.Thread(target=go, daemon=True)
+            STATS["thread"].start()
+        return {"ok": True}
+    if path == "/api/campaigns/submit":   # Claude submits the pending links in Chrome (submit_now.py)
+        U = uploader()
+        sb = U.jload(U.UP / "submit.json", {})
+        if sb.get("state") == "running" and pid_alive(sb.get("pid")):
+            raise ValueError("already submitting")
+        if not C.pending_submissions():
+            raise ValueError("nothing to submit")
+        U.UP.mkdir(parents=True, exist_ok=True)
+        U.jsave(U.UP / "submit.json", {"state": "running", "started": time.time(), "pid": None})
+        pr = subprocess.Popen([sys.executable, str(HERE / "submit_now.py")], cwd=str(ROOT), stdout=subprocess.DEVNULL,
+                              stderr=open(U.UP / "submit.err", "w"), start_new_session=True)
+        U.jsave(U.UP / "submit.json", {"state": "running", "started": time.time(), "pid": pr.pid})
+        return {"ok": True}
+    if path == "/api/campaigns/submit/stop":
+        U = uploader()
+        sb = U.jload(U.UP / "submit.json", {})
+        if sb.get("state") == "running" and pid_alive(sb.get("pid")):
+            os.killpg(os.getpgid(int(sb["pid"])), signal.SIGTERM)
+            U.jsave(U.UP / "submit.json", dict(sb, state="stopped", finished=time.time()))
+        return {"ok": True}
+    raise ValueError("unknown campaign action")
+
 
 EXR = JOBS / ".extract"
 TRENDS = {"proc": None}
@@ -846,14 +832,14 @@ def extract_start(body):
     for u in urls:
         if not VIDEO_URL.match(u):
             raise ValueError(f"not a YouTube video link: {u[:80]}")
-    cmd = [sys.executable, str(HERE / "extract.py"), *urls, *(["--auto", str(auto)] if auto else []),
-           "--max-minutes", str(int(max(10, min(600, float(body.get("minutes") or 90))))),
-           "--picks", str(int(max(1, min(10, float(body.get("picks") or 5))))),
-           "--power", body.get("power") if body.get("power") in ("full", "balanced", "cool") else "full"]
-    if not body.get("claude", True):
-        cmd.append("--no-claude")
-    if not body.get("render", True):
-        cmd.append("--no-render")
+    # one way to run: Claude picks, looks, keeps the best, they render and join the queue (extract.py defaults)
+    cmd = [sys.executable, str(HERE / "extract.py"), *urls, *(["--auto", str(auto)] if auto else []), "--power", "balanced"]
+    camp = str(body.get("campaign") or "")
+    if camp:   # make these clips for a joined paid campaign: picked by its rules, rendered with its overlay
+        c = campaigns_mod().get(camp)
+        if not c or not c.get("joined"):
+            raise ValueError("join that campaign first (Earn page)")
+        cmd += ["--campaign", camp]
     EXR.mkdir(parents=True, exist_ok=True)
     with open(EXR / "last_start.log", "w") as log:
         subprocess.Popen(cmd, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -897,18 +883,6 @@ def extract_stop(body):
     raise ValueError("that run isn't running")
 
 
-def extract_rerender(body):
-    if any(r["active"] for r in extract_runs(3)):
-        raise ValueError("an extraction is already running")
-    run = str(body.get("run", ""))
-    if not re.match(r"^\d{8}-\d{6}$", run) or not (EXR / run / "status.json").exists():
-        raise ValueError("unknown run")
-    with open(EXR / "last_start.log", "w") as log:
-        subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--rerender", run], cwd=str(ROOT), stdout=log,
-                         stderr=subprocess.STDOUT, start_new_session=True)
-    return {"ok": True}
-
-
 def trending():
     f = EXR / "trends.json"
     data = load_json(f) if f.exists() else {"at": None, "rows": []}
@@ -921,11 +895,13 @@ def trending():
     return data
 
 
-def trending_refresh():
+def trending_refresh(body=None):
+    """The trending list; a campaign run asks for one creator's GTA 6 videos (query) over the last 3 days."""
+    q = re.sub(r"[^\w\s'.-]", "", str((body or {}).get("query") or ""))[:60].strip()
     if TRENDS["proc"] is None or TRENDS["proc"].poll() is not None:
         EXR.mkdir(parents=True, exist_ok=True)
         TRENDS["proc"] = subprocess.Popen([sys.executable, str(HERE / "trends.py"), "--json", str(EXR / "trends.json"),
-                                           "--out", str(EXR / "trends.md")], cwd=str(ROOT),
+                                           "--out", str(EXR / "trends.md"), *(["--query", q, "--hours", "72"] if q else [])], cwd=str(ROOT),
                                           stdout=subprocess.DEVNULL, stderr=open(EXR / "trends.log", "w"))
     return {"ok": True}
 
@@ -991,7 +967,8 @@ def rq_states():
 
 
 RSTAGES = {"start": "loading the caption models", "words": "timing the captions word by word", "edit": "editing: hook first, cutting pauses",
-           "layout": "finding the webcam", "encode": "encoding the 1080×1920 clip", "done": "finishing"}
+           "layout": "finding the webcam", "encode": "encoding the 1080×1920 clip", "audio": "evening out the sound",
+           "done": "finishing", "qa": "Claude is checking the finished clip"}
 STAGE_RE = re.compile(r"^stage: (\w+) t=([\d.]+)(?: dur=([\d.]+))?")
 
 
@@ -1040,7 +1017,9 @@ def render_progress(states):
         st, out, dur = render_log(job, n)
         last = max(st, key=st.get) if st else "start"
         label = RSTAGES.get(last, last)
-        if last in ("encode", "done") and dur:
+        if last == "qa":
+            frac, left = 0.97, 15
+        elif last in ("encode", "audio", "done") and dur:
             f = min(1.0, out / dur)
             frac, left = 0.5 + 0.5 * f, enc * (1 - f)
             label += f" · {round(100 * f)}%"
@@ -1115,28 +1094,6 @@ def pick_rank_state(d):
     if rk.get("state") in ("running", "queued") and not pid_alive(rk.get("pid")):
         rk = {"state": "failed", "error": "stopped before it finished"}
     return rk
-
-
-def picks_rank(body):
-    jobs = [str(j or "") for j in (body.get("jobs") or [body.get("job")])]
-    for job in jobs:
-        if not NAME_RE.match(job) or not (JOBS / job / "candidates_audit.json").exists():
-            raise ValueError("unknown video")
-    jobs = [j for j in dict.fromkeys(jobs) if pick_rank_state(JOBS / j).get("state") not in ("running", "queued")]
-    if len(jobs) > 1:   # one process ranks them three at a time; the rest show as waiting
-        pr = subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--rank-all", *jobs], cwd=str(ROOT),
-                              stdout=subprocess.DEVNULL, stderr=open(EXR / "rank_all.log", "w"), start_new_session=True)
-        for job in jobs:
-            save_json(JOBS / job / "picks_rank.json", {**pick_rank_state(JOBS / job), "state": "queued", "pid": pr.pid})
-        return {"ok": True, "started": len(jobs)}
-    started = 0
-    for job in jobs:
-        pr = subprocess.Popen([sys.executable, str(HERE / "extract.py"), "--rank", job], cwd=str(ROOT),
-                              stdout=subprocess.DEVNULL, stderr=open(JOBS / job / "picks_rank.log", "w"), start_new_session=True)
-        prev = pick_rank_state(JOBS / job)   # keep the old ranking visible until the new one is in
-        save_json(JOBS / job / "picks_rank.json", {**prev, "state": "running", "pid": pr.pid, "started": time.time()})
-        started += 1
-    return {"ok": True, "started": started}
 
 
 def pick_find(job, n):
@@ -1226,33 +1183,6 @@ def picks_hide(body):
     return {"ok": True}
 
 
-def picks_summary():
-    try:
-        ps = [p for v in picks_data()["videos"] for p in v["picks"]]
-    except Exception:
-        return None
-    return {"to_render": sum(1 for p in ps if not p["hidden"] and not p["clips"]),
-            "rendering": sum(1 for p in ps if p["queue"] and p["queue"]["state"] in ("queued", "fetching", "rendering"))}
-
-
-def home():
-    q = {"to_post": 0, "posted_24h": 0, "next": None, "last_post": None}
-    try:
-        qd = queue_data()
-        todo = [i for i in qd["items"] if not i["skipped"] and not i.get("hold")
-                and not any(i["state"].get(p, {}).get("posted") for p in ("tiktok", "youtube", "instagram"))]
-        now = time.time()
-        q = {"to_post": len(todo), "total": len(qd["items"]), "next": todo[0]["title"] if todo else None, "last_post": qd["last_post"],
-             "posted_24h": sum(1 for i in qd["items"] for v in i["state"].values() if v.get("posted") and now - v.get("updated", 0) < 86400)}
-    except Exception:
-        pass
-    live = live_state()
-    return {"live": {"running": bool(live), "streams": [s["tag"] for s in (live or {}).get("streams", []) if s.get("alive")],
-                     "clips": len(live_clips(200))},
-            "extract": (extract_runs(1) or [None])[0], "queue": q, "recent": rendered_clips(12), "now": time.time(),
-            "picks": picks_summary()}
-
-
 # ------------------------------------------------------------------ http
 
 class Handler(BaseHTTPRequestHandler):
@@ -1326,16 +1256,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
-            if not u.path.startswith(("/api/", "/media/", "/fonts/", "/fillers/")):
+            if not u.path.startswith(("/api/", "/media/", "/fonts/")):
                 return self.send_ui(u.path)
             if u.path.startswith("/media/"):
                 p = (JOBS / u.path[len("/media/"):]).resolve()
                 if JOBS not in p.parents or not p.is_file():
-                    return self.send_error(404)
-                return self.send_file(p)
-            if u.path.startswith("/fillers/"):
-                p = (FILLERS / u.path[len("/fillers/"):]).resolve()
-                if p.parent != FILLERS or not p.is_file():
                     return self.send_error(404)
                 return self.send_file(p)
             if u.path.startswith("/fonts/"):
@@ -1353,14 +1278,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(render_status(q["id"]))
             if u.path == "/api/wave":
                 return self.send_json(wave(q["job"], q["video"]))
-            if u.path == "/api/agent":
-                return self.send_json(agent_status(q["clip"]))
             if u.path == "/api/live":
                 return self.send_json(live_status())
             if u.path == "/api/live/top":
                 return self.send_json(live_top())
-            if u.path == "/api/home":
-                return self.send_json(home())
             if u.path == "/api/queue":
                 return self.send_json(queue_data())
             if u.path == "/api/picks":
@@ -1371,7 +1292,15 @@ class Handler(BaseHTTPRequestHandler):
                 f = pick_thumb(q.get("job"), q.get("n", 0))
                 return self.send_file(f) if f else self.send_error(404)
             if u.path == "/api/extract":
-                return self.send_json({"runs": extract_runs(), "trending": trending(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude"))})
+                return self.send_json({"runs": extract_runs(), "trending": trending(), "claude": bool(shutil.which(os.environ.get("CLAUDE_BIN") or "claude")),
+                                       "campaigns": [{"id": c["id"], "name": c["name"], "creators": c.get("creators") or [], "any_gta": bool(c.get("any_gta")),
+                                                      "rate": c.get("rate_per_1k"), "pool": c.get("pool")} for c in campaigns_mod().joined()]})
+            if u.path == "/api/campaigns":
+                return self.send_json(campaigns_data())
+            if u.path == "/api/campaigns/overlay":
+                C = campaigns_mod(); c = C.get(q.get("id", ""))
+                f = C.overlay_file(c) if c else None
+                return self.send_file(f) if f else self.send_error(404)
             if u.path == "/api/health":   # the Python this server starts every job with, and what it can't import
                 import importlib.util
                 mods = ("yt_dlp", "faster_whisper", "numpy", "cv2", "torch", "transformers")
@@ -1403,8 +1332,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(extract_stop(body))
             if u.path == "/api/picks/render":
                 return self.send_json(picks_render(body))
-            if u.path == "/api/picks/rank":
-                return self.send_json(picks_rank(body))
             if u.path == "/api/picks/cancel":
                 return self.send_json(picks_cancel(body))
             if u.path == "/api/picks/hide":
@@ -1413,16 +1340,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(extract_job(body))
             if u.path == "/api/extract/throttle":
                 return self.send_json(extract_throttle(body))
-            if u.path == "/api/extract/rerender":
-                return self.send_json(extract_rerender(body))
             if u.path == "/api/trending/refresh":
-                return self.send_json(trending_refresh())
+                return self.send_json(trending_refresh(body))
+            if u.path.startswith("/api/campaigns/"):
+                return self.send_json(campaigns_post(u.path, body))
             if u.path == "/api/render":
                 return self.send_json(render(body))
-            if u.path == "/api/presence":
-                return self.send_json(presence(body))
-            if u.path == "/api/agent":
-                return self.send_json(agent_post(body))
         except (ValueError, KeyError, TypeError) as e:
             return self.send_json({"error": str(e) or e.__class__.__name__}, 400)
         self.send_error(404)

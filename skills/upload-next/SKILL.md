@@ -1,6 +1,6 @@
 ---
 name: upload-next
-description: Post the next best clip from the queue to YouTube Shorts, TikTok and Instagram Reels through Claude in Chrome. Re-ranks the queue, checks frames from the video, uploads, records the links. Built to run unattended on an interval (/loop 2h /upload-next). Also what the Queue page's Post now button runs.
+description: Post the next best clip from the queue to YouTube Shorts, TikTok and Instagram Reels through Claude in Chrome. Chooses the best clip, checks its frames unless Claude already did when it was rendered, uploads, records the links. Built to run unattended on an interval (/loop 2h /upload-next). Also what the Post page's Post now button runs.
 ---
 
 # Upload the next clip
@@ -12,11 +12,11 @@ Run every command from the clip desk folder (the one with `jobs/` and `queue/`).
 
 - **TOOL**: `${CLAUDE_PLUGIN_ROOT}` when that is a real path; otherwise the folder that holds `scripts/uploader.py` (usually `./tool`).
 - **UPL**: the helper, `<python> TOOL/scripts/uploader.py`. `<python>` is `.venv/bin/python` (Windows `.venv\Scripts\python.exe`) when the desk has a `.venv`, else `python3`. When a prompt gives you UPL, use exactly that.
-- **The account**: `UPL status` prints `account` (`name` and `handles`), the only account you may post as. Set it with `UPL account --name "<page name>" --handle <handle>`, or with **Posting as** on the Queue page.
+- **The account**: `UPL status` prints `account` (`name` and `handles`), the only account you may post as. Set it with `UPL account --name "<page name>" --handle <handle>`, or with **Posting as** on the Post page.
 
 ## Post now (one chosen clip)
 
-When the human pressed **Post now** on the Queue page (`scripts/post_now.py`), the clip is already chosen: skip steps
+When the human pressed **Post now** on the Post page (`scripts/post_now.py`), the clip is already chosen: skip steps
 1 and 2 and do steps 3-6 for that clip only. Everything else here still applies.
 
 ## 1. Should this run post at all?
@@ -25,29 +25,31 @@ When the human pressed **Post now** on the Queue page (`scripts/post_now.py`), t
 
 Stop (one-line summary, no notification) when:
 - `minutes_since_last_post` < 100. A post went out recently, so a double tick or a manual post happened.
-- `account` is empty. Send one PushNotification: "Set the account you post as: Posting as, on the Queue page". Never guess an account.
+- `account` is empty. Send one PushNotification: "Set the account you post as: Posting as, on the Post page". Never guess an account.
 - `pending` is empty. Send one PushNotification: "Upload queue is empty: cut or queue more clips". Don't send it again if the last log entry in `queue/uploads/log.jsonl` is already about an empty queue.
 
-## 2. Re-rank and pick the best clip
+## 2. Pick the best clip
 
-Rank **every** pending clip yourself. Start from `rank`: it's the order from the last re-rank (the Queue page's
-Re-rank button, with `rank_reason`), but clips may have been added or posted since. A clip with `hold: true` is
+Rank **every** pending clip yourself: this is the one place the posting order is decided. Start from `rank` (the
+order clips joined the queue, or an older re-rank with `rank_reason`), but clips may have been added or posted since. A clip with `hold: true` is
 never posted: the re-rank decided it needs a human. A clip with `pinned: true` was picked by the human to post
 next: take it first (it still has to pass the visual check). Otherwise weigh, in order:
 1. **Hard no:** `auto_ok: false` (too long to upload in under 10 MB), or a warning that says the clip must be re-cut ("Old cut… Re-cut before posting"). Don't post these; leave them for the human. They aren't skipped, so they stay visible on the queue page.
 2. **Finish what's started:** a clip already live on 1–2 platforms (`already_on`) goes first, so each clip goes out on all three while it's fresh.
-3. **Hook strength:** a clear, surprising one-line hook that works muted, a named streamer, and a payoff.
-4. **Freshness:** newer streams and launch-week moments beat older ones.
-5. **Length:** 12–25 s is the sweet spot; 25–40 s needs a much stronger hook.
-6. **Variety:** don't pick the same creator as the last 2 entries in `recent_creators` if a comparable clip from someone else exists.
-7. **Warnings:** a platform-specific warning (e.g. "TikTok restricts vapes", "Instagram may limit reach") means skipping **that platform** for this clip, not the whole clip, unless the warning makes the clip a bad post overall.
-8. If `learning_rules` is set, its Current Rules override the guidance above.
+3. **Paid first:** a clip whose `campaigns` isn't empty earns money per view (a paid campaign the human joined): it goes before clips without one, the higher `rate` first, as long as its hook holds up.
+4. **Hook strength:** a clear, surprising one-line hook that works muted, a named streamer, and a payoff.
+5. **Freshness:** newer streams and launch-week moments beat older ones.
+6. **Length:** 12–25 s is the sweet spot; 25–40 s needs a much stronger hook.
+7. **Variety:** don't pick the same creator as the last 2 entries in `recent_creators` if a comparable clip from someone else exists.
+8. **Warnings:** a platform-specific warning (e.g. "TikTok restricts vapes", "Instagram may limit reach") means skipping **that platform** for this clip, not the whole clip, unless the warning makes the clip a bad post overall.
+9. If `learning_rules` is set, its Current Rules override the guidance above.
 
 Write 2–3 lines: the top 3 in your order and why #1 won.
 
-## 3. Visual check (required before any upload)
+## 3. Visual check (required before any upload, unless already done)
 
-`UPL frames <id>` then **Read** the sheet image it prints (6 frames, 2 rows × 3).
+If the clip's `qa` is `"ok"`, Claude already checked the finished clip's frames when it was rendered: skip this step.
+Otherwise (older clips, `qa` empty): `UPL frames <id>` then **Read** the sheet image it prints (6 frames, 2 rows × 3).
 
 The clip passes only if **all** of these hold:
 - There is real picture in every frame: no black, frozen, green or corrupted frames, and no missing panel.
@@ -127,6 +129,13 @@ If this fails twice on a platform, fall back to `file_upload` of the compressed 
 5. Click **Share** and wait for "Your reel has been shared".
 6. Get the link from the newest reel on the profile if it's easy; otherwise leave it empty.
 7. `UPL mark <id> instagram [--url <link>]`
+
+## 5b. Paid campaigns
+
+`UPL mark` prints `to submit: <campaign> (<platform>)` when the post qualifies for a paid campaign the human joined.
+If it did, submit those links now, in the same Chrome session, by the `campaign-submit` skill
+(`${CLAUDE_PLUGIN_ROOT}/skills/campaign-submit/SKILL.md`), only for this clip's entries. Its hard stops apply: never
+join a campaign, accept terms, sign in or open payout settings; leave anything that needs the human as to_submit.
 
 ## 6. Finish
 

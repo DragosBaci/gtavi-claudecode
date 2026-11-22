@@ -3,7 +3,6 @@
 import { BLEND, WHOOSH } from "./constants";
 import { editPos, estLen, outFromSrc, plan, srcFromOut, type Piece } from "./plan";
 import { drawFrame } from "./preview";
-import { drawPeers } from "./presence";
 import { ed, setEd } from "./store";
 import { drawTimeline } from "./timeline";
 import type { Project } from "./types";
@@ -132,7 +131,6 @@ export function startLoop() {
       if (mode !== "rendered") drawFrame();
       currentWord(); drawTimeline(true); updateTime();
     }
-    drawPeers();
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);

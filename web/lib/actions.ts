@@ -1,4 +1,4 @@
-// Everything that changes the clip: undoable, saved as a browser draft, shared with other windows.
+// Everything that changes the clip: undoable and saved as a browser draft.
 import { LNAME } from "./constants";
 import { E, play, seek, stop, tNow, vMax, vMin } from "./engine";
 import { buildGroups, buildUnits, plan } from "./plan";
@@ -14,8 +14,6 @@ export const draftKey = () => { const P = ed().P; return P ? `clipeditor:${P.job
 export function saveDraft() { const { P, S } = ed(); if (P) lsSet(draftKey(), { S, at: Date.now(), base: P.rendered?.updated || 0 }); }
 export function clearDraft() { lsDel(draftKey()); }
 
-/** Shared-edit bookkeeping used by the presence loop. */
-export const sync = { dirty: null as string | null, knownV: 0 };
 
 export function change(fn: (S: ClipState) => void, label?: string, quiet = false) {
   const { S, undo } = ed(); if (!S) return;
@@ -24,9 +22,8 @@ export function change(fn: (S: ClipState) => void, label?: string, quiet = false
   setEd({ S: next, undo: [...undo.slice(-99), JSON.stringify(S)], version: ed().version + 1 });
   saveDraft();
   if (label && !quiet) toast(label);
-  sync.dirty = label || "edited";
 }
-/** Live updates while dragging (no undo entry, no sync until the drag ends). */
+/** Live updates while dragging (no undo entry until the drag ends). */
 export function patch(fn: (S: ClipState) => void) {
   const S = ed().S; if (!S) return;
   const next = { ...S }; fn(next);
@@ -35,7 +32,7 @@ export function patch(fn: (S: ClipState) => void) {
 export function pushUndo() { const { S, undo } = ed(); setEd({ undo: [...undo.slice(-99), JSON.stringify(S)] }); }
 export function doUndo() {
   const { undo } = ed(); const u = undo[undo.length - 1]; if (!u) return;
-  setEd({ S: JSON.parse(u), undo: undo.slice(0, -1), version: ed().version + 1 }); saveDraft(); sync.dirty = "undo"; toast("Undone");
+  setEd({ S: JSON.parse(u), undo: undo.slice(0, -1), version: ed().version + 1 }); saveDraft(); toast("Undone");
 }
 
 // ---------------------------------------------------------------- loading
@@ -55,12 +52,9 @@ export async function openClip(x: Record<string, any>) {
   try { P = await api("/api/project?" + q); } catch (e: any) { setEd({ loading: e.message }); return; }
   history.replaceState(null, "", "?" + new URLSearchParams({ job: P.job, name: P.name }));
   let S: ClipState = JSON.parse(JSON.stringify(P.state)), restored = false;
-  if (needsFiller(P.state, P)) pickFiller(P.state, P);   // older brainrot clips: "random" -> a real video and start
   const d: any = lsGet(`clipeditor:${P.job}:${P.name}`, null);
   if (d && d.base === (P.rendered?.updated || 0) && JSON.stringify(d.S) !== JSON.stringify(S)) { S = d.S; restored = true; }
   if (!restored) S = JSON.parse(JSON.stringify(P.state));
-  if (needsFiller(S, P)) pickFiller(S, P);
-  sync.knownV = 0; sync.dirty = null;
   setEd({
     P, S, restored, units: buildUnits(P.words), groups: buildGroups(P.words), sel: null, undo: [], loading: null,
     strip: null, wave: null, curK: -1, version: ed().version + 1,
@@ -108,33 +102,12 @@ export function toggleHook(quiet = false) {
   if (!quiet) toast(was ? "Hook off: the clip starts at its beginning" : "Hook on: it plays first, then the transition");
 }
 
-/** Brainrot layout: settle the bottom video now (name + start second), so the preview is exactly what renders.
- *  name: a filler, "shuffle" (another one at random) or undefined (keep the video, new random spot). */
-export function pickFiller(S: ClipState, P: Project, name?: string) {
-  const list = P.fillers || []; if (!list.length) return;
-  let f = list.find(x => x.name === name);
-  if (!f && name === "shuffle") { const others = list.filter(x => x.name !== S.filler); f = (others.length ? others : list)[Math.floor(Math.random() * (others.length || list.length))]; }
-  if (!f) f = list.find(x => x.name === S.filler) || list.find(x => x.name.startsWith("subway")) || list[0];
-  S.filler = f.name;
-  S.filler_start = Math.round(Math.random() * Math.max(0, f.dur - 90) * 10) / 10;
-}
-const needsFiller = (S: ClipState, P: Project) => S.layout === "split" && !!(P.fillers || []).length &&
-  (!S.filler || S.filler === "random" || S.filler_start == null || !(P.fillers || []).some(f => f.name === S.filler));
-
 export function setSetting(key: keyof ClipState, value: any, quiet = true) {
   const name = key === "layout" ? LNAME[value] : String(value);
-  const P = ed().P;
   change(S => {
     (S as any)[key] = value;
-    if (key === "filler" && P) pickFiller(S, P, value);
-    if (P && needsFiller(S, P)) pickFiller(S, P);
   }, `${String(key).replace(/_/g, " ")}: ${name}`, quiet);
 }
-export function shuffleFiller(sameVideo = false) {
-  const P = ed().P; if (!P) return;
-  change(S => pickFiller(S, P, sameVideo ? undefined : "shuffle"), sameVideo ? "new spot in the bottom video" : "shuffled the bottom video", true);
-}
-
 /** Back to how the clip was when it was opened (its last render, or the pick). One undo step: ⌘Z brings the edits back. */
 export function resetEdits() {
   const { P } = ed(); if (!P) return;
@@ -148,7 +121,7 @@ export function resetEdits() {
 
 export function discardDraft() {
   const { P } = ed(); if (!P) return; clearDraft();
-  setEd({ S: JSON.parse(JSON.stringify(P.state)), restored: false, version: ed().version + 1 }); sync.dirty = "discarded edits";
+  setEd({ S: JSON.parse(JSON.stringify(P.state)), restored: false, version: ed().version + 1 });
 }
 
 // ---------------------------------------------------------------- view
@@ -158,11 +131,6 @@ export function setMode(m: Mode) {
 }
 export const openTab = (t: Tab | null) => setEd({ tab: t, menu: null });
 
-export function previewTransition() {
-  const { P, S } = ed(); if (!P || !S) return;
-  setMode("edit"); const full = plan(P, S); if (full.length < 2 || full[0].kind !== "hook") return;
-  E.startPlan([{ a: Math.max(full[0].a, full[0].b - 1.2), b: full[0].b, kind: "hook" }, { a: full[1].a, b: Math.min(full[1].b, full[1].a + 1.6), kind: "clip" }]);
-}
 export function playHook() {
   const S = ed().S; if (!S?.tease) return;
   setMode("edit"); E.startPlan([{ a: S.tease[0], b: S.tease[1], kind: "clip" }]);
@@ -171,7 +139,7 @@ export function playHook() {
 // ---------------------------------------------------------------- crop
 export function openCrop() {
   const { P, S } = ed(); if (!P || !S) return;
-  if (!["react", "facecam"].includes(S.layout)) { toast("Webcam tracking is used by the Split and Gameplay layouts"); return; }
+  if (S.layout !== "react") { toast("The webcam crop is used by the Split layout"); return; }
   stop();
   const c = S.cam !== "auto" ? S.cam.split(":").map(Number) : [0.02, 0.4, 0.22, 0.22];
   setEd({ crop: { box: c as any, aspect: "free" } });
@@ -183,33 +151,24 @@ export function applyCrop() {
 export function autoCrop() { setEd({ crop: null }); change(S => { S.cam = "auto"; }, "Track ON: webcam found at render"); }
 
 // ---------------------------------------------------------------- render
-export async function doRender(by: string) {
+export async function doRender() {
   const { P, S, render } = ed(); if (!P || !S || render) return;
   if (S.tease && (S.tease[1] - S.tease[0] < 0.4 || S.tease[1] - S.tease[0] > 4)) { toast("Hook must be 0.4–4 s"); return; }
   try {
-    const r = await api("/api/render", { job: P.job, name: P.name, set: P.set, pick: P.pick, state: S, by });
-    setEd({ render: { id: r.id, status: { state: "running", stage: "starting", elapsed: 0, log: [] } }, myRenders: [...ed().myRenders, r.id], tab: "export" });
-    pollRender(r.id, !/claude/i.test(by));
+    const r = await api("/api/render", { job: P.job, name: P.name, set: P.set, pick: P.pick, state: S });
+    setEd({ render: { id: r.id, status: { state: "running", stage: "starting", elapsed: 0, log: [] } }, tab: "export" });
+    pollRender(r.id);
   } catch (e: any) { toast(e.message); }
 }
-/** byHand: you pressed Render, so when it's done the clip opens on its Queue page, ready to post.
- *  Claude's scripted renders stay in the editor (its next steps need it). */
-async function pollRender(id: string, byHand = false) {
+/** When the render is done the clip is in the posting queue: open it on the Post page. */
+async function pollRender(id: string) {
   let st: any;
   try { st = await api("/api/render?id=" + id); } catch (e: any) { st = { state: "error", log: [e.message], elapsed: 0, stage: "" }; }
   setEd({ render: { id, status: st } });
-  if (st.state === "running") { setTimeout(() => pollRender(id, byHand), 1000); return; }
-  if (st.state === "done" && byHand) {
-    const P = ed().P!; clearDraft(); toast("Rendered ✓ Opening it in the Queue…");
-    setTimeout(() => { location.href = `/queue?id=${encodeURIComponent(`${P.job}/${P.name}`)}`; }, 700);
-    return;
-  }
+  if (st.state === "running") { setTimeout(() => pollRender(id), 1000); return; }
   if (st.state === "done") {
-    toast("Rendered ✓"); clearDraft();
-    const keep = JSON.stringify(ed().S), { P } = ed();
-    await openClip({ job: P!.job, name: P!.name });
-    setEd({ S: JSON.parse(keep), render: null, lastRender: st });
-    setMode("rendered"); E.rv && (E.rv.currentTime = 0); play();
+    const P = ed().P!; clearDraft(); toast("Rendered ✓ It's in the posting queue");
+    setTimeout(() => { location.href = `/queue?id=${encodeURIComponent(`${P.job}/${P.name}`)}`; }, 700);
   } else { toast("Render failed: see the log in Export"); setEd({ render: null, lastRender: st }); }
 }
 export function renameClip(n: string) {

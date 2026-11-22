@@ -29,7 +29,11 @@ from common import (SECTION_ENCODE, VIDEO_FMT, ffprobe, is_url, job_dir, load_js
                     ytdlp_base, ytdlp_json)
 import moments
 
-MODEL = os.environ.get("CLIP_WHISPER_MODEL", "small")
+MODEL = os.environ.get("CLIP_WHISPER_MODEL", "small")   # CPU workers
+# The GPU worker uses the stronger model: Claude picks moments by reading this transcript, so misheard slang and names
+# cost picks. Measured on Apple M5 Pro (Metal): small 22x real time, large-v3-turbo 13x. (Batched inference was
+# 2-4x faster but dropped 20-30% of the words on stream audio, so it is not used.)
+GPU_MODEL = os.environ.get("CLIP_WHISPER_GPU_MODEL", "large-v3-turbo")
 SR = 16000
 INFO_KEYS = ("id", "title", "uploader", "channel", "uploader_id", "webpage_url", "duration", "view_count",
              "upload_date", "heatmap", "is_live", "was_live", "live_status", "timestamp")
@@ -46,7 +50,8 @@ def worker(device, threads, tasks, results):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     from faster_whisper import WhisperModel
     try:
-        model = WhisperModel(MODEL, device=device, compute_type="float16" if device != "cpu" else "int8", cpu_threads=threads)
+        model = WhisperModel(GPU_MODEL if device != "cpu" else MODEL, device=device,
+                             compute_type="float16" if device != "cpu" else "int8", cpu_threads=threads)
     except Exception as e:  # GPU backend unavailable: become a CPU worker
         results.put({"note": f"{device} worker unavailable ({str(e)[:80]}), using cpu"})
         device = "cpu"
@@ -150,7 +155,11 @@ def start_full_video(job, limit):
     if vid.exists():
         job.full_video = True
         return
-    if not is_url(job.src):
+    if not is_url(job.src):   # a local file: into the job folder like a download (the desk only serves jobs/)
+        try:
+            os.link(Path(job.src).resolve(), vid)
+        except OSError:
+            shutil.copy2(Path(job.src).resolve(), vid)
         job.full_video = True
         return
 
@@ -331,7 +340,7 @@ def finalize(job, pool):
         job.full_video = False
     if job.full_video:
         job.update(stage="video")
-        src = str((d / "source.mp4") if is_url(job.src) else Path(job.src).resolve())
+        src = str(d / "source.mp4") if (d / "source.mp4").exists() else str(Path(job.src).resolve())
         for name in sets:
             c = load_json(d / f"{name}.json"); c["source"] = src; save_json(d / f"{name}.json", c)
     else:

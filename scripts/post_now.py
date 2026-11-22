@@ -40,6 +40,9 @@ def main():
     U.jsave(SETTINGS, {"permissions": {"allow": [
         "ClaudeInChromeDomain(www.youtube.com)", "ClaudeInChromeDomain(studio.youtube.com)",
         "ClaudeInChromeDomain(www.tiktok.com)", "ClaudeInChromeDomain(www.instagram.com)",
+        # paid campaigns this clip qualifies for: its links are submitted right after posting (skill step 5b)
+        "ClaudeInChromeDomain(contentrewards.com)", "ClaudeInChromeDomain(www.contentrewards.com)",
+        "ClaudeInChromeDomain(whop.com)", "ClaudeInChromeDomain(www.whop.com)", "ClaudeInChromeDomain(www.clip.tech)",
         "mcp__claude-in-chrome", "Read", "Glob",
         f"Bash({upl}:*)", "Bash(ffmpeg -v error -y -ss:*)",
     ]}})
@@ -61,6 +64,7 @@ no ranking: this clip was chosen). In it, UPL means exactly `{upl}`. Post only a
   move on. Skip a platform only for the skill's hard stops: wrong account, logged out, CAPTCHA or verification code
   (never type a password or solve a CAPTCHA), or an actual copyright claim / block shown by the platform. A failed
   upload or a page that didn't load: retry that platform once before skipping it.
+- Step 5b: if `mark` printed "to submit", submit those campaign links (campaign-submit skill, its hard stops apply).
 - Step 6: finish and close the tabs you opened.
 Notifications aren't available here: put anything the human must know in your final reply instead.
 End with one line per platform: posted + link, or skipped + why.

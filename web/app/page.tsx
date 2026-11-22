@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import Home from "@/components/Home";
+import Extract from "@/components/Extract";
 
-export const metadata: Metadata = { title: "Clip Desk", description: "Extract, watch live, edit and queue GTA 6 clips" };
+export const metadata: Metadata = { title: "Clip Desk", description: "Make GTA 6 clips: Claude picks, looks, cuts and queues the best moments" };
 
 export default function Page() {
-  return <Home />;
+  return <Extract />;
 }

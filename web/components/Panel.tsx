@@ -1,19 +1,20 @@
 "use client";
 import { useEffect, useState } from "react";
-import { change, openCrop, openTab, playHook, previewTransition, renameClip, saveDraft, setMode, setSetting, shuffleFiller, sync, toggleHook } from "@/lib/actions";
-import { AGENT_COLOR, LAYOUTS, TRANS_LIST, fillerName, transName } from "@/lib/constants";
-import { E, tNow, vMax, vMin } from "@/lib/engine";
-import { editPos, estLen } from "@/lib/plan";
+import { change, openCrop, openTab, playHook, renameClip, saveDraft, setMode, setSetting, toggleHook } from "@/lib/actions";
+import { LAYOUTS } from "@/lib/constants";
+import { vMax, vMin } from "@/lib/engine";
+import { estLen } from "@/lib/plan";
 import { setEd, useEd } from "@/lib/store";
 import type { Tab } from "@/lib/types";
 import { clamp, fmt } from "@/lib/util";
 import { I } from "./Icons";
 
+// The look (word captions, white title box, zoom into the clip, pause trimming, punch-in) is fixed: the editor only
+// changes what differs per clip.
 const RAIL: [Tab, string, React.ReactNode][] = [
-  ["claude", "Claude", I.sparkle], ["captions", "Caption", I.cc], ["text", "Text", I.text], ["layout", "Layout", I.layout],
-  ["transitions", "Transitions", I.transitions], ["hook", "Hook", I.wave], ["trim", "Trim", I.scissors], ["export", "Export", I.upload],
+  ["text", "Title", I.text], ["layout", "Layout", I.layout], ["trim", "Trim", I.scissors], ["export", "Export", I.upload],
 ];
-const TITLES: Record<Tab, string> = { claude: "Claude", captions: "Caption", text: "Text", layout: "Layout", transitions: "Transitions", hook: "Hook", trim: "Trim", export: "Export" };
+const TITLES: Record<Tab, string> = { text: "Title", layout: "Layout", trim: "Trim and hook", export: "Export" };
 
 export function Rail() {
   const tab = useEd(s => s.tab);
@@ -31,7 +32,7 @@ function Card({ k, v, on, title, desc, wide, onPick }: { k: string; v: string; o
 
 export function Panel() {
   const tab = useEd(s => s.tab), P = useEd(s => s.P), S = useEd(s => s.S);
-  const agentLog = useEd(s => s.agentLog), render = useEd(s => s.render), lastRender = useEd(s => s.lastRender);
+  const render = useEd(s => s.render), lastRender = useEd(s => s.lastRender);
   const [titleDraft, setTitleDraft] = useState("");
   useEffect(() => { if (S) setTitleDraft(S.title); }, [S?.title, tab]);   // eslint-disable-line react-hooks/exhaustive-deps
   if (!tab || !P || !S) return <aside id="panel" />;
@@ -40,83 +41,24 @@ export function Panel() {
 
   const body = (() => {
     switch (tab) {
-      case "claude": return (<>
-        <div className="note">Ask Claude in the terminal to edit this clip (&quot;cut the chat read&quot;, &quot;hook on the scream&quot;, &quot;zoom transition and render&quot;). You watch its cursor do it here, and every step can be undone.</div>
-        <div className="field"><label>Activity</label><div className="list">
-          {agentLog.length ? agentLog.slice(-8).reverse().map((a, i) => <div className="li" key={i}><i style={{ background: AGENT_COLOR }} />{a}</div>) : <div style={{ color: "var(--mute)", fontSize: 13 }}>Nothing yet</div>}
-        </div></div>
-        <div className="field"><label>API</label><pre className="code">{`POST /api/agent
-{"clip": "${P.job}/${P.name}",
- "steps": [{"do": "select", "text": "…"},
-           {"do": "cut"},
-           {"do": "set", "key": "transition", "value": "zoom"},
-           {"do": "render"}]}`}</pre></div>
-      </>);
-      case "captions": return (<>
-        <div className="cards">
-          {[["word", "Word by word", "Yellow highlight on the spoken word"], ["bubble", "Bubble", "White speech bubble"], ["none", "None", "Title only"]].map(([k, n, d]) =>
-            <Card key={k} k="captions" v={k} on={S.captions === k} title={n} desc={d} wide={k === "none"} onPick={() => setSetting("captions", k)} />)}
-        </div>
-        <div className="note" style={{ marginTop: 12 }}>The render re-transcribes the clip and pins every word to the audio, so the final captions can differ a little from this preview.</div>
-      </>);
       case "text": return (<>
         <div className="field"><label>Title on the video</label>
           <textarea className="inp" id="pTitle" rows={3} maxLength={120} value={titleDraft}
-            onChange={e => { setTitleDraft(e.target.value); setEd({ S: { ...S, title: e.target.value } }); saveDraft(); sync.dirty = "editing the title"; }} />
+            onChange={e => { setTitleDraft(e.target.value); setEd({ S: { ...S, title: e.target.value } }); saveDraft(); }} />
           <div className="sugg">{(P.titles || []).filter(t => t !== S.title).map(t => <button key={t} onClick={() => change(s => { s.title = t; }, "changed the title", true)}>{t}</button>)}</div>
-        </div>
-        <div className="field"><label>Style</label><div className="seg">
-          <button data-set="title_style" data-v="box" className={S.title_style !== "outline" ? "on" : ""} onClick={() => setSetting("title_style", "box")}>White box</button>
-          <button data-set="title_style" data-v="outline" className={S.title_style === "outline" ? "on" : ""} onClick={() => setSetting("title_style", "outline")}>Outline</button>
-        </div></div>
-        <div className="field"><label>Show the title</label><div className="seg">
-          <button data-set="title_secs" data-v="0" className={!S.title_secs ? "on" : ""} onClick={() => change(s => { s.title_secs = 0; }, "title stays the whole clip", true)}>Whole clip</button>
-          <button className={S.title_secs ? "on" : ""} onClick={() => { if (!S.title_secs) { const v = Math.min(3, Math.max(1, Math.round(len / 2))); change(s => { s.title_secs = v; }, `title disappears after ${v} s`, true); } }}>Then hide it</button>
-        </div>
-          {!!S.title_secs && <div className="tsecs">
-            <div className="tsecs-h"><span>Hides at</span><b>{S.title_secs.toFixed(1)} s</b><span>of {len.toFixed(1)} s</span></div>
-            <input type="range" min={0.5} max={Math.max(1, Math.floor(len * 2) / 2)} step={0.5} value={Math.min(S.title_secs, Math.max(1, len))}
-              onChange={e => change(s => { s.title_secs = +e.target.value; }, "title timing", true)} />
-            <button className="btnx sm tsecs-btn" title="Hide the title from the frame the playhead is on" onClick={() => {
-              const o = editPos(P, S, tNow(), false, E.pi);
-              if (o == null || o < 0.3) { setEd({ toast: { msg: "Put the playhead inside the clip first", id: Date.now() } }); return; }
-              change(s => { s.title_secs = Math.round(o * 10) / 10; }, `title hides at ${o.toFixed(1)} s`);
-            }}>⏱ Hide it at the playhead</button>
-          </div>}
         </div>
         <div className="note">4–9 words, CAPS on 1–2 key words. Name the streamer, leave out the outcome.</div>
       </>);
       case "layout": return (<>
         <div className="cards">{LAYOUTS.map(([k, n, d]) => <Card key={k} k="layout" v={k} on={S.layout === k} title={n} desc={d} onPick={() => setSetting("layout", k)} />)}</div>
-        {S.layout === "split" ? (<>
-          <div className="field" style={{ marginTop: 16 }}><label>Bottom video</label>
-            <div className="cards">
-              {(P.fillers || []).map(f =>
-                <Card key={f.name} k="filler" v={f.name} on={S.filler === f.name} title={fillerName(f.name)} desc={`${Math.round(f.dur / 60)} min of gameplay`} onPick={() => setSetting("filler", f.name)} />)}
-            </div>
-            {!!(P.fillers || []).length && <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
-              <button className="btnx sm" onClick={() => shuffleFiller()}>🎲 Shuffle</button>
-              <button className="btnx sm" onClick={() => shuffleFiller(true)}>🎲 New spot</button>
-              <span style={{ color: "var(--mute)", fontSize: 12.5 }}>starts at {fmt(S.filler_start || 0)}</span>
-            </div>}
-            {!(P.fillers || []).length && <div className="note warn" style={{ marginTop: 10 }}>No videos in fillers/ yet: put a Subway Surfers or parkour .mp4 there.</div>}
-          </div>
-          <div className="field"><label>Clip takes <b style={{ color: "var(--text)" }}>{Math.round((S.split || 0.5) * 100)}%</b> of the height</label>
-            <input type="range" min={0.35} max={0.65} step={0.05} value={S.split || 0.5} onChange={e => change(s => { s.split = +e.target.value; }, "clip size", true)} />
-          </div>
-          <div className="note">What you see is what renders: the same bottom video, from the same second, in step with the clip (muted). Captions sit on the seam, the title at the top.</div>
-        </>) : (
+        {S.layout === "react" && (
         <div className="field" style={{ marginTop: 16 }}><label>Webcam</label>
           <div className="row"><button className="btnx" onClick={openCrop}>Crop webcam</button><button className="btnx" data-set="cam" data-v="auto" disabled={S.cam === "auto"} onClick={() => setSetting("cam", "auto")}>Track ON</button></div>
           <div className="note" style={{ marginTop: 10 }}>{S.cam === "auto" ? "Track ON: cut.py finds the face at render time. Crop it yourself when it picks the wrong face (a thumbnail, the game character) or for full-body moments." : `Track OFF: your crop ${S.cam}.`}</div>
         </div>)}
+        {S.layout === "track" && <div className="note" style={{ marginTop: 16 }}>Focus aims itself at render time: at the streamer's face when there's no game on screen, otherwise it follows the action.</div>}
       </>);
-      case "transitions": return (<>
-        {!S.tease && <div className="note warn">The hook is off, so there is no transition. Turn it on with ⚡ Hook in the toolbar.</div>}
-        <div className="cards">{TRANS_LIST.map(([k, n, d]) => <Card key={k} k="transition" v={k} on={S.transition === k} title={n} desc={d} onPick={() => setSetting("transition", k)} />)}</div>
-        <button className="btnx" style={{ marginTop: 12, width: "100%" }} disabled={!S.tease} onClick={previewTransition}>▶ Preview transition</button>
-      </>);
-      case "hook": return (<>
+      case "trim": return (<>
         <div className="toggle"><input type="checkbox" id="pHookOn" checked={!!S.tease} onChange={() => toggleHook()} /><label htmlFor="pHookOn">Play a hook first</label></div>
         {S.tease ? (<>
           <div className="field"><label>Hook (source seconds)</label>
@@ -128,18 +70,10 @@ export function Panel() {
             <button data-set="keep_after_tease" data-v="0" className={!S.keep_after_tease ? "on" : ""} onClick={() => setSetting("keep_after_tease", false)}>End on it</button>
             <button data-set="keep_after_tease" data-v="1" className={S.keep_after_tease ? "on" : ""} onClick={() => setSetting("keep_after_tease", true)}>Keep playing</button>
           </div></div>
-          <div className="note">Transition into the clip: <b>{transName(S.transition)}</b>. Change it in Transitions.</div>
         </>) : <div className="note">Select the culminating 1–2 s in the transcript (the reveal, the punchline) and press ⚡ Hook. It plays first, then the transition, then the clip builds up to it.</div>}
-      </>);
-      case "trim": return (<>
-        <div className="field"><label>Clip (source seconds)</label>
+              <div className="field" style={{ marginTop: 14 }}><label>Clip (source seconds)</label>
           <NumPair a={S.start} b={S.end} onChange={(a, b) => { if (b - a >= 1) change(s => { s.start = clamp(a, vMin(), vMax()); s.end = clamp(b, vMin(), vMax()); }, "trimmed the clip", true); }} />
         </div>
-        <div className="field"><label>Remove pauses longer than <b style={{ color: "var(--text)" }}>{S.tighten > 0 ? S.tighten.toFixed(2) + " s" : "off"}</b></label>
-          <input type="range" min={0} max={1.5} step={0.05} value={S.tighten} onChange={e => change(s => { s.tighten = +e.target.value; }, "pause trimming", true)} />
-        </div>
-        <div className="toggle"><input type="checkbox" id="pTrim" checked={S.trim} onChange={e => change(s => { s.trim = e.target.checked; }, "snap to speech", true)} /><label htmlFor="pTrim">Snap start and end to the speech</label></div>
-        <div className="toggle"><input type="checkbox" id="pPunch" checked={S.punch} onChange={e => change(s => { s.punch = e.target.checked; }, "punch-in", true)} /><label htmlFor="pPunch">Punch-in zoom on the first frames</label></div>
         <div className="field" style={{ marginTop: 14 }}><label>Cuts ({S.drop.length})</label><div className="list">
           {S.drop.length ? S.drop.map(([a, b], i) => <div className="li" key={i}><i style={{ background: "var(--red)" }} />{fmt(a - off)}–{fmt(b - off)} · {(b - a).toFixed(1)} s<button className="x" onClick={() => change(s => { s.drop.splice(i, 1); }, "removed a cut", true)}>✕</button></div>)
             : <div style={{ color: "var(--mute)", fontSize: 13 }}>Select words, then ✂ Cut (Delete)</div>}

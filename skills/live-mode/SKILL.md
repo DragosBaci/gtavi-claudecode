@@ -27,7 +27,7 @@ Before starting:
 While it runs:
 
 1. Check `jobs/live_watch.md` for new rows every few minutes. Review each one: pick the best, skip spoilers and nudity.
-2. For each keeper: read its `transcript.json`, write a title with `hook-writer`, then `clip-cutter` with `--set candidates_audit --pick 1` (the pick already has the hook), then `rule-check`. If the human has the editor open, make the edit through `/api/agent` so they see it.
+2. For each keeper: read its `transcript.json`, write a title with `hook-writer`, then `clip-cutter` with `--set candidates_audit --pick 1` (the pick already has the hook), then `rule-check`.
 3. Send the human one message with the best 1 to 3 clips (caption, credit, file path). They say "yes" and post. Speed matters, so keep it to one message.
 
 When done: list what was recorded, what was clipped, and log the posts via `learning-loop`. Ask the streamer for permission when they are reachable.

@@ -3,7 +3,6 @@ import { useEffect, useRef } from "react";
 import { act, doRender, doUndo, toast } from "@/lib/actions";
 import { E, seek, stop, tNow, togglePlay, vMax, vMin } from "@/lib/engine";
 import { editPoints, estLen } from "@/lib/plan";
-import { ME } from "@/lib/presence";
 import { ed, setEd, useEd } from "@/lib/store";
 import { TL, attachTimeline, fitTimeline, setZoom } from "@/lib/timeline";
 import { I } from "./Icons";
@@ -56,14 +55,14 @@ export default function Bottom() {
 }
 
 function Dock() {
-  const P = useEd(s => s.P), S = useEd(s => s.S), render = useEd(s => s.render), remote = useEd(s => s.remoteRender);
+  const P = useEd(s => s.P), S = useEd(s => s.S), render = useEd(s => s.render);
   if (!P || !S) return <div id="dock"><div className="info">{I.add}<span>—</span></div><button id="renderBtn" disabled>Render</button></div>;
-  const len = estLen(P, S), busy = !!render || remote?.state === "running";
-  const el = render?.status.elapsed ?? remote?.elapsed ?? 0;
+  const len = estLen(P, S), busy = !!render;
+  const el = render?.status.elapsed ?? 0;
   return (
     <div id="dock">
       <div className="info">{I.add}<span>edits/<b>{P.name}</b>.mp4</span><span className={"len " + (len >= 12 && len <= 25 ? "ok" : "warn")}>≈ {len.toFixed(1)} s</span></div>
-      <button id="renderBtn" disabled={busy} onClick={() => { stop(); doRender(ME.name); }}>{busy ? `Rendering… ${Math.round(el)}s` : "Render"}</button>
+      <button id="renderBtn" disabled={busy} onClick={() => { stop(); doRender(); }}>{busy ? `Rendering… ${Math.round(el)}s` : "Render"}</button>
     </div>
   );
 }

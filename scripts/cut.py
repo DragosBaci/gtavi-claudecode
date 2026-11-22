@@ -25,7 +25,7 @@ W, H = 1080, 1920
 FONTS = Path(__file__).resolve().parent.parent / "fonts"   # Montserrat (SIL OFL), loaded by libass via fontsdir
 CAP_FONT, TITLE_FONT = "Montserrat Black", "Montserrat ExtraBold"
 CAP_SIZE, TITLE_SIZE = 118, 80
-TITLE_Y = {"facecam": int(1920 * 0.38), "fill": 300, "blur": 380}   # title box centre per layout (the editor preview matches)
+TITLE_Y = {"facecam": int(1920 * 0.38), "fill": 300, "blur": 380, "track": 300}   # title box centre per layout (the editor preview matches)
 LIBASS_SCALE = 0.786   # measured: libass draws Montserrat this much narrower than PIL at the same nominal size
 
 
@@ -93,6 +93,12 @@ def clean(s, profanity=False):
     return s if profanity else _SWEARS.sub(_mask, s)
 
 
+def cap_word(w):
+    """A word as shown in the word-by-word captions: trailing commas, periods, ellipses and colons dropped
+    ("YEAH," -> "YEAH"); ? and ! stay, they carry the tone. Numbers like "30,000" or "2.5" are untouched."""
+    return _re.sub(r"[,.;:…]+$", "", w) or w
+
+
 def esc(s):
     return s.replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
 
@@ -153,7 +159,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 continue
             parts = []
             for j, x in enumerate(g):
-                t = esc(x["w"].upper())
+                t = esc(cap_word(x["w"]).upper())
                 parts.append("{\\c&H0000E5FF&}" + t + "{\\c&H00FFFFFF&}" if j == k else t)
             pop = "{\\fscx112\\fscy112\\t(0,90,\\fscx100\\fscy100)}" if k == 0 else ""
             if caps == 'bubble':
@@ -187,7 +193,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return hdr + "\n".join(ev) + "\n"
 
 
-CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560, "split": 960}
+CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560, "split": 960, "track": 1470}
+FOCUS_Y, FOCUS_H = 300, 1350   # track (Focus): the 1080x1350 window's top edge and height
+LNAMES = {"track": "Focus", "blur": "Fit"}
 TOP = 730  # react layout: face panel height = seam y (even)
 GAME_H = H - TOP  # 1190
 
@@ -200,7 +208,7 @@ SHARP = "unsharp=5:5:0.8:5:5:0.0"   # light luma sharpening for upscaled webcams
 
 
 def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None, split=0.5,
-                 fps=30, punch=0.0, flashes=()):
+                 fps=30, punch=0.0, flashes=(), focus=None):
     """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py.
     fps: output frame rate. punch: zoom-in amount at the start (0.10 = starts 10% zoomed, settles in 0.4 s).
     flashes: [(t, dur)] short white flashes (tease -> clip transition)."""
@@ -210,6 +218,13 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
     elif layout == "blur":
         v = (f"[0:v]split[a][b];[a]scale=-2:{H},crop={W}:{H},boxblur=24:2,eq=brightness=-0.08[bg];"
              f"[b]scale={W}:-2{L}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
+    elif layout == "track":  # Focus: a 4:5 window (focus = crop w, h, x, y in source px; x may move) over a blur
+        cw, chh, fx, fy = focus
+        up = FOCUS_H / max(chh, 1)
+        sharp = f",{SHARP}" if up > 1.3 else ""
+        v = (f"[0:v]split[a][b];[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=10:2,"
+             f"eq=brightness=-0.10:saturation=1.1,scale={W}:{H},setsar=1[bg];"
+             f"[b]crop={cw}:{chh}:'{fx}':'{fy}',scale={W}:{FOCUS_H}{L}{sharp},setsar=1[fg];[bg][fg]overlay=0:{FOCUS_Y}[v]")
     elif layout == "split":  # content on top, filler gameplay (input 1) below
         th = even(H * split); bh = H - th
         v = (f"[0:v]scale={W}:{th}:force_original_aspect_ratio=increase{L},crop={W}:{th},setsar=1,format=yuv420p[top];"
@@ -239,14 +254,21 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
         v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{int(H * 0.38)}:force_original_aspect_ratio=increase{L},"
              f"crop={W}:{int(H * 0.38)},{SHARP}[cam];[b]scale=-2:{H - int(H * 0.38)}{L},crop={W}:{H - int(H * 0.38)}[game];[cam][game]vstack[v]")
     post = f"fps={fps}"
-    if punch > 0:  # zoom from 1+punch to 1 over the first 0.4 s (ease-out); the frame moves from frame one
-        z = f"if(lt(it\\,0.4)\\,1+{punch}*pow(1-it/0.4\\,2)\\,1)"
-        post += (f",zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={fps}")
+    if punch > 0:  # zoom from 1+punch to 1 over the first 0.4 s (ease-out); the frame moves from frame one.
+        # Only the first 0.4 s go through the zoom (a per-frame scale, sub-pixel smooth, then a centre crop); the
+        # rest of the clip passes untouched. (zoompan over the whole clip cost a full extra pass and jittered.)
+        z = f"(1+{punch}*pow(1-t/0.4\\,2))"
+        v += (f";[v]{post},split[pz0][pr0];[pz0]trim=end=0.4,setpts=PTS-STARTPTS,"
+              f"scale=w='trunc({W}*{z}/2)*2':h='trunc({H}*{z}/2)*2':eval=frame:flags=bicubic,crop={W}:{H},setsar=1[pz];"
+              f"[pr0]trim=start=0.4,setpts=PTS-STARTPTS[pr];[pz][pr]concat=n=2:v=1:a=0[vp]")
+        lab, post = "vp", "null"
+    else:
+        lab = "v"
     for t, dur in flashes:
         post += f",drawbox=x=0:y=0:w=iw:h=ih:color=white@0.7:t=fill:enable='between(t\\,{t:.3f}\\,{t + dur:.3f})'"
     sub = str(ass).replace("\\", "/").replace(":", "\\:")
     fdir = str(FONTS).replace("\\", "/").replace(":", "\\:")
-    return v + f";[v]{post},subtitles='{sub}':fontsdir='{fdir}'[vo]"
+    return v + f";[{lab}]{post},subtitles='{sub}':fontsdir='{fdir}'[vo]"
 
 
 def game_offset(video, s0, e0, src, cam_box):
@@ -410,6 +432,34 @@ def remap_words(words, segs):
     return out
 
 
+AUDIO_PRE = "highpass=f=60,acompressor=threshold=-21dB:ratio=2.5:attack=8:release=180:makeup=1"
+LOUD_TARGET = "I=-14:TP=-1.5:LRA=20"
+
+
+def finish_audio(master, mp4):
+    """Two-pass loudness: measure the finished mix, then apply loudnorm in linear mode (one fixed gain, so no pumping)
+    while copying the video. The master (.mov: video + PCM audio) is removed afterwards."""
+    import json as _json, re as _r, subprocess as _sp
+    has_audio = '"audio"' in _json.dumps(__import__("common").ffprobe(master))
+    af = []
+    if has_audio:
+        r = _sp.run([tool("ffmpeg"), "-hide_banner", "-nostats", "-i", str(master), "-vn", "-af",
+                     f"loudnorm={LOUD_TARGET}:print_format=json", "-f", "null", "-"], capture_output=True, text=True)
+        m = _r.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)
+        try:
+            j = _json.loads(m.group(0))
+            if float(j["input_i"]) < -60:   # silence: nothing to normalise
+                raise ValueError
+            af = ["-af", f"loudnorm={LOUD_TARGET}:measured_I={j['input_i']}:measured_TP={j['input_tp']}:"
+                         f"measured_LRA={j['input_lra']}:measured_thresh={j['input_thresh']}:offset={j['target_offset']}:"
+                         f"linear=true,aresample=48000"]
+        except (AttributeError, ValueError, KeyError):
+            af = ["-af", f"loudnorm={LOUD_TARGET},aresample=48000"]
+    run([tool("ffmpeg"), "-y", "-v", "error", "-i", str(master), "-map", "0:v", *(["-map", "0:a"] + af + ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"] if has_audio else []),
+         "-c:v", "copy", "-movflags", "+faststart", str(mp4)])
+    Path(master).unlink(missing_ok=True)
+
+
 T0 = __import__("time").time()
 
 
@@ -421,7 +471,12 @@ def stage(name, extra=""):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job"); ap.add_argument("--pick", type=int, default=1)
-    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react", "split"], default="blur")
+    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react", "split", "track"], default="blur",
+                    help="track = Focus: a big 4:5 window aimed at the face or the action, over a blur (focus.py)")
+    ap.add_argument("--fallback", choices=["track", "blur"], default="track",
+                    help="react/facecam without a usable webcam (with --or-blur): Focus (default) or the old Fit")
+    ap.add_argument("--focus", choices=["auto", "motion"], default="auto",
+                    help="track: auto (face when there's no game on screen, else follow the action) or always motion")
     ap.add_argument("--force", action="store_true", help="react: skip the 'is there gameplay outside the cam' check")
     ap.add_argument("--set", default="candidates", help="candidates (shorts) or candidates_long (pipeline.py)")
     ap.add_argument("--filler", default="random", help="split: video path, name in fillers/ (gta_ramp, subway_vertical...) or random")
@@ -434,8 +489,12 @@ def main():
     ap.add_argument("--captions", choices=["word", "bubble", "none"], default="word")
     ap.add_argument("--hook", default="")
     ap.add_argument("--or-blur", action="store_true",
-                    help="react: when there's no usable streamer face, render the blur (Fit) layout in this same run "
-                         "instead of exiting (the title becomes the hook box) - saves running cut.py twice")
+                    help="react: when there's no usable streamer face, render the --fallback layout (Focus by default) in "
+                         "this same run instead of exiting (the title becomes the hook box) - saves running cut.py twice")
+    ap.add_argument("--overlay", metavar="PNG:POS:WIDTH",
+                    help="a campaign's logo or overlay on the whole clip: POS full|top-left|top-right|bottom-left|bottom-right|"
+                         "top|bottom|center, WIDTH share of the video width (full ignores it)")
+    ap.add_argument("--campaign", help="the paid campaign this clip is made for (saved in the .json; campaigns.py)")
     ap.add_argument("--allow-profanity", action="store_true", help="keep swear words in captions (slurs are always masked)")
     ap.add_argument("--cam", default="auto", help="auto (find the webcam) or x:y:w:h fractions")
     ap.add_argument("--start", type=float); ap.add_argument("--end", type=float)
@@ -545,6 +604,8 @@ def main():
     layout, cam, side = a.layout, a.cam, 'right'
     face_expr = None
     stage("layout")
+    focus_cam, focus_gp = None, True   # what the Focus layout aims at (see focus.py)
+    fb = 'blur' if a.fallback == 'blur' else 'track'
     if layout in ('react', 'facecam') and cam == 'auto':
         from facecam import find_cam
         r = find_cam(SRC, L0, L1)
@@ -552,16 +613,19 @@ def main():
             if not a.or_blur:
                 sys.exit(f"skipped: no streamer face over gameplay in this moment ({r.get('mode')}: {r.get('reason', '')}). "
                          "React clips need the game on screen with the cam as a separate box. Pick another moment or stream.")
-            layout, a.layout, a.hook = 'blur_fallback', 'blur', a.hook or a.title   # falls through to "using the blur layout" below
+            print(f"react: no streamer face over gameplay ({r.get('reason', '')}), using the {LNAMES[fb]} layout")
+            focus_cam = r
+            layout, a.layout, a.hook = fb, fb, a.hook or a.title
         if layout == 'react':
             from facecam import has_gameplay, face_crop_expr
             if not a.force and not has_gameplay(SRC, L0, L1, r['box']):
                 if not a.or_blur:
                     sys.exit("skipped: the area outside the webcam is not gameplay (same scene or no game on screen). "
                              "Pick a moment where GTA 6 is on screen.")
-                print("react: the area outside the webcam is not gameplay")
-                r, a.layout, a.hook = {"reason": "no gameplay beside the cam"}, 'blur', a.hook or a.title
-            if r.get('mode') == 'face' and r.get('face_track'):
+                print(f"react: the area outside the webcam is not gameplay, using the {LNAMES[fb]} layout")
+                focus_cam, focus_gp = r, False
+                layout, a.layout, a.hook = fb, fb, a.hook or a.title
+            elif r.get('mode') == 'face' and r.get('face_track'):
                 from common import ffprobe as _fp
                 _vs = [x for x in _fp(SRC)['streams'] if x.get('codec_type') == 'video'][0]
                 from facecam import inner_edges
@@ -572,18 +636,35 @@ def main():
                 face_expr = (fe['w'], fe['h'], fe['x'], fe['y'])
                 print(f"facecam: no clean cam frame, still crop around the face, {len(fe['shots'])} shot(s) "
                       f"cut at {[round(sh[0], 1) for sh in fe['shots'][1:]]} s ({r.get('summary', '')})")
-        if r.get('mode') in ('cam', 'face'):
-            bx = list(r['box'])
-            if r['mode'] == 'face':  # no webcam frame: widen the face crop so it is not a blurry close-up
-                cx, cy = bx[0] + bx[2] / 2, bx[1] + bx[3] / 2
-                bw, bh = min(1.0, bx[2] * 2.6), min(1.0, bx[3] * 2.2)
-                bx = [min(max(0.0, cx - bw / 2), 1 - bw), min(max(0.0, cy - bh / 2), 1 - bh), bw, bh]
-            cam = ':'.join(f'{v:.4f}' for v in bx)
-            side = 'left' if r['box'][0] + r['box'][2] / 2 < 0.5 else 'right'
-            print(f"facecam: {r.get('mode')} box {cam} ({r.get('summary', '')})")
-        else:
-            print(f"facecam: no stable face found ({r.get('reason', '')}), using the blur layout")
-            layout = 'blur'
+        if layout in ('react', 'facecam'):
+            if r.get('mode') in ('cam', 'face'):
+                bx = list(r['box'])
+                if r['mode'] == 'face':  # no webcam frame: widen the face crop so it is not a blurry close-up
+                    cx, cy = bx[0] + bx[2] / 2, bx[1] + bx[3] / 2
+                    bw, bh = min(1.0, bx[2] * 2.6), min(1.0, bx[3] * 2.2)
+                    bx = [min(max(0.0, cx - bw / 2), 1 - bw), min(max(0.0, cy - bh / 2), 1 - bh), bw, bh]
+                cam = ':'.join(f'{v:.4f}' for v in bx)
+                side = 'left' if r['box'][0] + r['box'][2] / 2 < 0.5 else 'right'
+                print(f"facecam: {r.get('mode')} box {cam} ({r.get('summary', '')})")
+            else:
+                print(f"facecam: no stable face found ({r.get('reason', '')}), using the {LNAMES[fb]} layout")
+                focus_cam, layout = r, fb
+    focus = None
+    if layout == 'track':
+        from common import ffprobe as _fp
+        from facecam import find_cam, has_gameplay
+        _vs = [x for x in _fp(SRC)['streams'] if x.get('codec_type') == 'video'][0]
+        fsw, fsh = int(_vs['width']), int(_vs['height'])
+        if focus_cam is None:   # chosen directly: look for a face first
+            focus_cam = find_cam(SRC, L0, L1)
+            if focus_cam.get('box'):
+                focus_gp = has_gameplay(SRC, L0, L1, focus_cam['box'])
+        elif focus_gp and focus_cam.get('mode') == 'none' and focus_cam.get('face_track'):
+            focus_gp = False   # a full-frame face (IRL / talking head): frame the person
+        import focus as _focus
+        focus = _focus.choose(SRC, L0, L1, fsw, fsh, cam=focus_cam, gameplay=focus_gp, ffmpeg=tool("ffmpeg"),
+                              force_motion=a.focus == 'motion')
+        print(f"focus: {focus['mode']}: {focus['note']}")
     elif layout in ('react', 'facecam') and cam != 'auto':
         side = 'left' if float(cam.split(':')[0]) + float(cam.split(':')[2]) / 2 < 0.5 else 'right'
     cap_y = CAP_Y[layout]
@@ -618,7 +699,8 @@ def main():
     else:
         fps = int(float(a.fps))
     v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr, split=a.split,
-                     fps=fps, punch=0 if a.no_punch else 0.10, flashes=flashes)
+                     fps=fps, punch=0 if a.no_punch else 0.10, flashes=flashes,
+                     focus=focus and (focus["w"], focus["h"], focus["x"], focus["y"]))
     mp4 = out / f"{base}.mp4"
     extra, filler = [], None
     if layout == "split":
@@ -633,7 +715,9 @@ def main():
         fd = float(_probe(filler)["format"]["duration"])
         fs = (a.filler_start % fd) if a.filler_start is not None else random.uniform(0, max(0.0, fd - (e0 - s0) - 1))
         extra = ["-stream_loop", "-1", "-ss", f"{fs:.2f}", "-i", str(filler)]
-    LOUD = "loudnorm=I=-14:TP=-1.5:LRA=11"
+    # audio: gentle compression here (voice and game audio sit closer together), then finish_audio() measures the
+    # finished mix and normalises it to -14 LUFS in linear mode (two-pass: no pumping, unlike one-pass loudnorm)
+    LOUD = AUDIO_PRE
     amap, aopt = ["-map", "0:a?"], ["-af", LOUD]
     if xf:   # blend the finished hook into the finished clip (after the layout, so panels never mix)
         kind, d, whoosh = xf
@@ -652,13 +736,35 @@ def main():
                   f"adelay={int(ws * 1000)}:all=1[wh];[ax][wh]amix=inputs=2:duration=first:normalize=0[am]")
         v += f";[{'am' if whoosh else 'ax'}]{LOUD}[ao]"
         amap, aopt = ["-map", "[ao]"], []
+    if a.overlay:   # a campaign's logo / overlay over everything (hook, transition and clip)
+        opath, opos, owidth = a.overlay.rsplit(":", 2)
+        idx = 1 + (1 if extra else 0)
+        extra = extra + ["-loop", "1", "-i", opath]
+        if opos == "full":
+            lg = f"scale={W}:{H}"
+            xy = "0:0"
+        else:
+            lw = even(W * min(1.0, max(0.05, float(owidth))))
+            lg = f"scale={lw}:-1"
+            m = 40
+            xs = {"left": f"{m}", "right": f"main_w-overlay_w-{m}", "mid": "(main_w-overlay_w)/2"}
+            ys = {"top": "60", "bottom": "main_h-overlay_h-480", "mid": "(main_h-overlay_h)/2"}
+            vert, horiz = (opos.split("-") + ["mid"])[:2] if "-" in opos else ((opos, "mid") if opos in ("top", "bottom") else ("mid", "mid"))
+            xy = f"{xs[horiz]}:{ys[vert]}"
+        i = v.rindex("[vo]")   # rename the finished picture in place (the audio chain may follow it)
+        v = (v[:i] + "[vpre]" + v[i + 4:] + f";[{idx}:v]format=rgba,{lg}[lg];"
+             f"[vpre][lg]overlay={xy}:shortest=1,format=yuv420p[vo]")
+        print(f"overlay: {Path(opath).name} {opos}")
+    tmp_mov = out / f".{base}.master.mov"   # video + uncompressed audio; finish_audio() makes the mp4 from it
     stage("encode", f"dur={e0 - s0:.2f}")
     # -progress: out_time lines on stdout, so the render log shows how far the encode is
     run([tool("ffmpeg"), "-y", "-v", "error", "-progress", "pipe:1", "-stats_period", "1", "-ss", f"{L0:.2f}", "-to", f"{L1:.2f}", "-i", SRC, *extra,
          "-t", f"{e0 - s0:.2f}", "-filter_complex", v, "-map", "[vo]", *amap, *aopt,
          # high quality on purpose: every platform re-compresses the upload, a clean master survives that better
          "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-maxrate", "16M", "-bufsize", "32M",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(mp4)])
+         "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ar", "48000", str(tmp_mov)])
+    stage("audio")
+    finish_audio(tmp_mov, mp4)
     if SRC.endswith(".edit.mkv"):
         Path(SRC).unlink(missing_ok=True)
     main_segs = [sg for sg in segs if len(sg) == 2][1 if tease else 0:]
@@ -666,10 +772,12 @@ def main():
                                      "tease": tease, "fps": fps,
                                      "transition": {"name": a.transition if tease else None, "overlap": xf[1] if xf else 0.0}, "layout": layout, "filler": filler and filler.name, "filler_start": round(fs, 2) if filler else None,
                                      "hook": a.hook or a.title, "title": a.title, "cam": cam,
+                                     "campaign": a.campaign, "overlay": a.overlay,
                                      "source_url": info.get("webpage_url"), "source_title": info.get("title"),
                                      "source_channel": info.get("channel") or info.get("uploader"),
                                      # everything needed to reopen and re-render this clip in the editor
-                                     "args": vars(a), "video": str(SRC0), "video_offset": OFF0, "game_x": gx})
+                                     "args": vars(a), "video": str(SRC0), "video_offset": OFF0, "game_x": gx,
+                                     "focus": focus and {k: focus[k] for k in ("mode", "w", "h", "x", "y", "path") if k in focus}})
     stage("done")
     print(mp4)
 

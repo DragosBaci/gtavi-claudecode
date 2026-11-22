@@ -25,6 +25,7 @@ STATE, SKIPS, LOG = Q / "state.json", UP / "skipped.json", UP / "log.jsonl"
 ADDED, OVERRIDES = Q / "added.json", Q / "overrides.json"   # written by the editor's Queue page
 ACCOUNT = Q / "accounts.json"   # {"name": ..., "handles": [...]}: the only account the uploader may post as
 ORDER = Q / "order.json"   # the last re-rank (rerank.py): posting order, a reason per clip, holds
+REMOVED = Q / "removed.json"   # ids taken out of the queue: never shown or added back
 PLATFORMS = ("youtube", "tiktok", "instagram")
 MAX_DUR = {"youtube": 180, "tiktok": 600, "instagram": 180}
 LIMIT = 9_500_000          # Claude in Chrome uploads at most 10 MB per file
@@ -56,18 +57,44 @@ def log(**kw):
         f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), **kw}, ensure_ascii=False) + "\n")
 
 
-def platform_text(title, hook, creator, src):
-    """Per-platform post text, the same templates as build_queue.py."""
+def platform_text(title, hook, creator, src, extra=""):
+    """Per-platform post text, the same templates as build_queue.py. extra: what a paid campaign requires in the
+    caption (its line, hashtags), added to every caption and the YouTube description."""
     tag = re.sub(r"[^a-z0-9]+", "", (creator or "").lower()) or "gta6clips"
     tags_core = ["gta6", "gtavi", tag, "gaming"]
+    ex = f"\n{extra}" if extra else ""
     return {
-        "tiktok": {"caption": f"{hook}\n\n🎥 {creator}\n" + " ".join("#" + t for t in tags_core + ["gta6clips"])},
+        "tiktok": {"caption": f"{hook}\n\n🎥 {creator}{ex}\n" + " ".join("#" + t for t in tags_core + ["gta6clips"])},
         "youtube": {"title": (title if len(title) <= 92 else title[:89] + "…") + " #gta6",
-                    "description": f"{hook}\n\n🎥 Credit: {creator}, full stream: {src}\n\n#gta6 #gtavi #{tag} #shorts",
+                    "description": f"{hook}\n\n🎥 Credit: {creator}, full stream: {src}{ex}\n\n#gta6 #gtavi #{tag} #shorts",
                     "tags": ", ".join(["gta 6", "gta vi", (creator or "").lower(), "gta 6 gameplay", "gta 6 funny moments", "gta 6 reaction"])},
-        "instagram": {"caption": f"{hook}\n\n🎥 {creator}\n.\n" + " ".join("#" + t for t in tags_core + ["gta6clips"])},
+        "instagram": {"caption": f"{hook}\n\n🎥 {creator}{ex}\n.\n" + " ".join("#" + t for t in tags_core + ["gta6clips"])},
         "x": {"text": f"{title} 😭\n\n🎥 {creator}\n#GTA6"},
     }
+
+
+def qa_warnings(cid):
+    """Claude's check of the finished clip (extract.py qa -> edits/<name>.qa.json) as queue warnings: only when it
+    said "fix" (a re-cut would fix it) or "bad" (don't post). The re-rank holds clips with such warnings."""
+    job, _, name = cid.partition("/")
+    q = jload(ROOT / "jobs" / job / "edits" / f"{name}.qa.json", {})
+    if q.get("verdict") not in ("fix", "bad"):
+        return []
+    head = "QA: don't post" if q["verdict"] == "bad" else "QA: re-cut"
+    return [f"{head}: {'; '.join(q.get('issues') or []) or 'see the clip'}"]
+
+
+def enqueue(job, name, why="Claude kept it and it passed the frame check"):
+    """Put a finished clip in the posting queue (what every finished clip does by itself now: there is no separate
+    "add to queue" step). False when it is already queued or was removed from the queue by hand."""
+    cid = f"{job}/{name}"
+    if cid in items() or cid in set(jload(REMOVED, [])):
+        return False
+    it = added_item(job, name)
+    it["why"] = why
+    jsave(ADDED, jload(ADDED, []) + [it])
+    log(event="queued", id=cid, why=why)
+    return True
 
 
 def added_item(job, name):
@@ -86,16 +113,42 @@ def added_item(job, name):
             "warnings": [], "creator": creator, "source_url": src, "source_title": info.get("title"),
             "format": "split-screen" if meta.get("layout") == "split" else "reaction", "duration": round(dur, 1),
             "long": dur > 60, "video": f"/media/{job}/edits/{name}.mp4", "added": time.time(),
-            "platforms": platform_text(title, meta.get("hook") or title, creator, src)}
+            "platforms": platform_text(title, meta.get("hook") or title, creator, src, campaign_caption(meta))}
+
+
+def campaign_caption(meta):
+    """Caption text the clip's campaign requires (the campaign it was rendered for)."""
+    if not meta.get("campaign"):
+        return ""
+    try:
+        import campaigns
+        return campaigns.caption_extra(campaigns.get(meta["campaign"]))
+    except Exception:
+        return ""
+
+
+def campaign_info(cid):
+    """The joined paid campaigns this clip's creator is paid by: [{id, name, rate, pool, eligible, problems}]."""
+    try:
+        import campaigns
+        return campaigns.match(cid)
+    except Exception:
+        return []
 
 
 def items():
     """Every queued clip, in queue order: build_queue.py's ranking, then clips added on the Queue page.
     Text edited on the Queue page (overrides.json) replaces the generated text."""
-    out = {it["id"]: it for it in jload(Q / "queue.json", {"items": []})["items"]}
+    gone = set(jload(REMOVED, []))
+    out = {it["id"]: it for it in jload(Q / "queue.json", {"items": []})["items"] if it["id"] not in gone}
     for it in jload(ADDED, []):
-        if it["id"] not in out:
+        if it["id"] not in out and it["id"] not in gone:
             out[it["id"]] = dict(it, rank=len(out) + 1)
+    for cid, it in out.items():   # the clip check can come after the item was queued
+        qw = [w for w in qa_warnings(cid) if w not in (it.get("warnings") or [])]
+        if qw:
+            it["warnings"] = list(it.get("warnings") or []) + qw
+        it["campaigns"] = campaign_info(cid)
     for cid, by_platform in jload(OVERRIDES, {}).items():
         if cid in out:
             for plat, fields in by_platform.items():
@@ -150,7 +203,11 @@ def status():
         pending.append({k: it[k] for k in ("id", "rank", "title", "hook", "why", "warnings", "creator", "duration", "format")}
                        | {"rank_reason": it.get("rank_reason"), "hold": bool(it.get("hold")), "pinned": bool(it.get("pinned"))}
                        | {"pending": todo, "already_on": [p for p in PLATFORMS if posted(st, it["id"], p)],
-                          "auto_ok": kbps_for(it["duration"]) >= MIN_720_KBPS})
+                          "auto_ok": kbps_for(it["duration"]) >= MIN_720_KBPS,
+                          # Claude already looked at the finished clip's frames (extract.py qa): "ok" needs no second check
+                          # paid campaigns it qualifies for (joined ones): these go out first, best rate first
+                          "campaigns": [{k: m[k] for k in ("name", "rate", "pool", "platforms")} for m in it.get("campaigns") or [] if m["eligible"]],
+                          "qa": jload(ROOT / "jobs" / it["id"].partition("/")[0] / "edits" / f"{it['id'].partition('/')[2]}.qa.json", {}).get("verdict")})
     learning = ROOT / "learning.md"
     print(json.dumps({
         "now": time.strftime("%Y-%m-%d %H:%M"),
@@ -236,6 +293,12 @@ def mark(cid, platform, url):
         e["url"] = url
     jsave(STATE, st)
     log(event="posted", id=cid, platform=platform, url=url)
+    try:   # campaigns this post qualifies for: their submissions (submit_now.py / the campaign-submit skill send them)
+        import campaigns
+        for e in campaigns.on_posted(cid, platform, url):
+            print(f"to submit: {e['campaign']} ({platform})")
+    except Exception as ex:
+        print(f"campaign check failed: {ex}")
     print(f"marked {cid} posted on {platform}" + (f": {url}" if url else ""))
 
 
@@ -267,6 +330,10 @@ def main():
     m = sub.add_parser("mark"); m.add_argument("id"); m.add_argument("platform"); m.add_argument("--url", default="")
     s = sub.add_parser("skip"); s.add_argument("id"); s.add_argument("--reason", required=True)
     f = sub.add_parser("fail"); f.add_argument("id"); f.add_argument("platform"); f.add_argument("--reason", required=True)
+    qp = sub.add_parser("queue"); qp.add_argument("id", help="<job>/<clip name>")
+    sub.add_parser("submissions")
+    sb = sub.add_parser("submitted"); sb.add_argument("id"); sb.add_argument("platform"); sb.add_argument("campaign")
+    sb.add_argument("--status", default="submitted"); sb.add_argument("--note", default="")
     a = ap.parse_args()
     if a.cmd == "status": status()
     elif a.cmd == "account": account(a.name, a.handle)
@@ -275,6 +342,17 @@ def main():
     elif a.cmd == "mark": mark(a.id, a.platform, a.url)
     elif a.cmd == "skip": skip(a.id, a.reason)
     elif a.cmd == "fail": log(event="failed", id=a.id, platform=a.platform, reason=a.reason); print("logged")
+    elif a.cmd == "submissions":
+        import campaigns
+        print(json.dumps(campaigns.pending_submissions(), indent=1, ensure_ascii=False))
+    elif a.cmd == "submitted":
+        import campaigns
+        e = campaigns.set_status(a.id, a.platform, a.campaign, a.status, a.note)
+        log(event="campaign_" + a.status, id=a.id, platform=a.platform, campaign=a.campaign, note=a.note)
+        print(f"{a.campaign}: {a.id} on {a.platform} -> {e['status']}")
+    elif a.cmd == "queue":
+        job, _, name = a.id.partition("/")
+        print("queued" if enqueue(job, name, why="queued from the terminal") else "already queued (or removed earlier)")
 
 
 if __name__ == "__main__":

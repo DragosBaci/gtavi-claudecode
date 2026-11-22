@@ -8,7 +8,7 @@
 
 <p align="center">GTA 6 is about to break the internet. Claude Code watches the biggest streams, catches the second chat explodes and hands you a ready-to-post vertical clip. Campaigns pay per 1,000 views. You just hit post.</p>
 
-<p align="center"><img src="https://img.shields.io/badge/Claude_Code-plugin-e8457f" alt="Claude Code: plugin"> <img src="https://img.shields.io/badge/skills-18-e8457f" alt="skills: 18"> <img src="https://img.shields.io/badge/clips-1080x1920-e8457f" alt="clips: 1080x1920"> <img src="https://img.shields.io/badge/languages-5-e8457f" alt="languages: 5"></p>
+<p align="center"><img src="https://img.shields.io/badge/Claude_Code-plugin-e8457f" alt="Claude Code: plugin"> <img src="https://img.shields.io/badge/skills-19-e8457f" alt="skills: 19"> <img src="https://img.shields.io/badge/clips-1080x1920-e8457f" alt="clips: 1080x1920"> <img src="https://img.shields.io/badge/languages-5-e8457f" alt="languages: 5"></p>
 <p align="center"><img src="https://img.shields.io/badge/GTA_6-Nov_19-e8457f" alt="GTA 6: Nov 19"> <img src="https://img.shields.io/badge/license-MIT-e8457f" alt="license: MIT"></p>
 <p align="center"><sub>Unofficial fan project. Not affiliated with Rockstar Games, Take-Two or Anthropic.</sub></p>
 <p align="center"><a href="#first-run-paste-this-into-claude-code">Quick start</a> · <a href="#two-ways-to-make-money">Make money</a> · <a href="#whats-inside">Skills</a> · <a href="#the-rules-that-make-clips-win">Clip rules</a> · <a href="#run-the-scripts-yourself">Scripts</a></p>
@@ -62,14 +62,15 @@ No income is promised. Your result depends on speed, picks and hooks, and the sc
 | Skill | What you get |
 |---|---|
 | `setup` | Installs ffmpeg, yt-dlp and faster-whisper, asks 4 questions, builds your page folder |
-| `desk-tour` | Sets up and starts the Clip Desk (http://127.0.0.1:8766), then walks you through Home, Extract, Editor, Queue and Live while you make your first clip |
+| `desk-tour` | Sets up and starts the Clip Desk (http://127.0.0.1:8766), then walks you through Make, Editor, Post and Live while you make your first clip |
 | `campaign-finder` | Live campaigns: rate per 1K views, budget left, rules, link |
+| `campaign-submit` | Submits posted clip links to the paid campaigns they qualify for, in Chrome, signed in as you. Runs after posting and from the Earn page |
 | `trend-radar` | GTA 6 videos from the last 24 h ranked by views per hour |
 | `stream-finder` | Who is streaming GTA 6 right now, ranked by viewers |
 | `moment-finder` | Best 15 to 40 s moments, scored by loudness spikes, hype words, YouTube "most replayed" and chat spikes |
 | `live-mode` | Records a live stream and cuts a clip every time chat explodes |
 | `twitch-reaction` | Reaction clips like the viral ones: the streamer's face on top, the game below, a big title on the seam. Finds the top GTA 6 Twitch streams with no account, reads chat and finds the webcam by itself |
-| `clip-cutter` | 1080x1920 clip: word-by-word captions, hook box, -14 LUFS. Fill, blurred background or facecam on top |
+| `clip-cutter` | 1080x1920 clip: word-by-word captions, hook box, two-pass -14 LUFS. Split (face on top), Focus (big window that follows the face or the action), Fill, Fit |
 | `hook-writer` | 3 hook options per clip |
 | `rule-check` | Length, format, hashtags and banned content checked before you post |
 | `multilang` | One clip in 5 languages: translated word-by-word captions and hook in ES, PT, DE, RU, optional stock-voice hook. Non-English GTA pages are almost empty |
@@ -78,9 +79,9 @@ No income is promised. Your result depends on speed, picks and hooks, and the sc
 | `cheat-codes` | All reported GTA 6 cheat codes with unlock tasks and sources, turned into a 4-slide cheat carousel |
 | `playbook` | Your full daily routine and launch-day plan |
 | `learning-loop` | Scoreboard, one test per day, payouts from real numbers only |
-| `upload-next` | Posts the best queued clip to YouTube Shorts, TikTok and Instagram Reels through Claude in Chrome: re-ranks, checks frames, uploads, records the links. Run it on a timer: `/loop 2h /gtavi-claudecode:upload-next` |
+| `upload-next` | Posts the best queued clip to YouTube Shorts, TikTok and Instagram Reels through Claude in Chrome: chooses the best one, uploads, records the links. Run it on a timer: `/loop 2h /gtavi-claudecode:upload-next` |
 
-Nothing is posted unless you press **Post now** on the Queue page or start `upload-next`. Claude only posts as the account you set in **Posting as**, never types a password and never solves a CAPTCHA.
+Nothing is posted unless you press **Post now** on the Post page or start `upload-next`. Claude only posts as the account you set in **Posting as**, never types a password and never solves a CAPTCHA.
 
 ## Hard rules
 
@@ -97,10 +98,12 @@ python scripts/cut.py jobs/<id> --pick 2 --layout facecam --hook "Nobody noticed
 python scripts/check.py jobs/<id>/edits/clip_2.mp4 --campaign campaigns.md
 python scripts/live.py "https://www.youtube.com/watch?v=<live>" --minutes 60
 python scripts/watch.py https://twitch.tv/<a> https://twitch.tv/<b> --minutes 120   # several streams, clips when chat explodes
-python scripts/editor.py        # then open http://127.0.0.1:8766 (Clip Desk: Home, Extract, Live, Queue, Editor)
+python scripts/editor.py        # then open http://127.0.0.1:8766 (Clip Desk: Make, Post, Live, and the editor)
 python scripts/uploader.py status                     # the posting queue (data in queue/ of your desk folder)
 python scripts/uploader.py account --name "My Page" --handle mypage   # the only account Claude may post as
-python scripts/rerank.py                              # Claude orders the unposted clips
+python scripts/stats.py                               # real views/likes of every post -> scoreboard.csv (feeds the pickers)
+python scripts/campaigns.py list                      # paid campaigns; `earnings`, `match <job>/<clip>`, `parse <id>`
+python scripts/frames.py jobs/<id>                    # frame strips of the picks (or --clip <name>) for a visual check
 python scripts/post_now.py <job>/<clip>               # Claude posts this clip now, in Chrome
 ```
 
@@ -113,22 +116,29 @@ npm run dev                                  # development: http://localhost:300
 
 ### Clip Desk
 
-`scripts/editor.py` serves the whole desk in the browser (run it from the folder that holds `jobs/`). One look, one nav: **Home · Extract · Live · Queue · Editor**.
+`scripts/editor.py` serves the whole desk in the browser (run it from the folder that holds `jobs/`). Four pages: **Make · Post · Earn · Live**; the editor opens from any clip.
 
-- **Home** (`/`): what's running, the posting queue at a glance, the latest clips.
-- **Extract** (`/extract`): paste YouTube links or pick from the trending GTA 6 videos, press **Start**. `extract.py` runs `pipeline.py` (transcript and scored moments), then Claude (`claude -p`, headless) reads each transcript the way `moment-finder` says and picks the moments, then `cut.py` renders each pick (Split, or Fit when there's no webcam). Progress, Claude's notes and the picks show live; every pick has an Edit link. "Top scores only" skips Claude.
-- **Queue** (`/queue`): the posting queue (clips added here, saved in `queue/` of your desk folder). Set **Posting as** first. Select a clip to watch it, edit its text per platform (saved to `queue/overrides.json`, which the auto-uploader uses too), mark it posted with its link, skip it for the auto-uploader or open it in the editor. **✦ Re-rank with Claude** orders the queue; **▶ Post next** moves a clip to the front; **🚀 Post now** has Claude post it in Chrome. **Not queued** lists rendered clips you can add.
+- **Make** (`/`): paste YouTube links or pick from the trending GTA 6 videos (or let Claude choose them) and press **Start**. Everything after that runs by itself: `pipeline.py` transcribes, Claude (`claude -p`, Opus by default: `CLAUDE_MODEL_PICK`) reads each transcript the way `moment-finder` says and picks moments, looks at 8 frames of each and keeps only the ones it would bet on, `cut.py` renders the keeps (Split when the streamer's webcam is over gameplay, otherwise Focus), Claude checks each finished clip's frames, and the ones that pass go straight into the posting queue. **Moments** below lists every pick with Claude's verdict; render a *maybe* by hand if you want it too.
+- **Post** (`/queue`): the posting queue. Set **Posting as** first. Select a clip to watch it, edit its text per platform (saved to `queue/overrides.json`, which the auto-uploader uses too), **▶ Post next**, **🚀 Post now** (Claude posts it in Chrome), mark it posted with its link, or **Remove** it. The auto-uploader (`upload-next`) decides the order when it posts.
+
+### Earn (paid campaigns)
+
+`/earn` turns clips into campaign money. `campaign-finder` keeps `campaigns.json` current (rate per 1K views, budget, creators, platforms). Join a campaign on its own page, then on Earn press **I joined it**, paste its rules (Claude turns them into settings: length, required overlay and where, caption text, hashtags, payout limits) and add its overlay PNG. From then on:
+
+- every new clip of that campaign's creators is rendered with its overlay and the required caption text (`cut.py --overlay`, `campaigns.py`), and a Make run can be made **for a campaign** (that creator's latest videos, picked by its rules);
+- the Post page marks qualifying clips **$** and they go out first; a clip that breaks a rule says why (too long, made without the overlay);
+- when a clip goes live, its link is queued to submit, and Claude submits it in Chrome right after posting, or with **Submit with Claude** (`submit_now.py`, skill `campaign-submit`). It never joins a campaign, accepts terms, signs in or opens payout settings;
+- Earn shows submissions and their status, real views (`scoreboard.csv`), an estimate of what they're worth (rate × views, fee and per-post limits applied) and the payouts you record (`payouts.csv`).
 
 ### Clip editor
 
-`/edit` edits the clips `cut.py` made:
+`/edit` fixes a clip:
 
 - **Transcript**: drag across words, then Cut (Delete), Restore, Set as hook (H), Start/End here ([ ]), or Keep silent (K) for a silent visual moment.
-- **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the transition, then the clip with your cuts and the pauses trimmed the way the render trims them.
-- **Hook first: on/off** (Shift+H) next to the preview; switching it back on restores the same hook. The Hook panel picks the transition into the clip: Zoom (default), Whip, Slide up, Dip to black, Pixelate, Circle, Dissolve, Flash, Cut or Rewind, each previewed live.
-- **Crop webcam**: drag and resize the webcam box on the source frame (Custom, Panel, Original, 9:16, 1:1, 16:9, 4:3), or leave it on auto-detect.
-- **Timeline**: thumbnails, the clip window and hook with draggable edges, cuts, kept parts, trimmed pauses and the pieces of the last render. Shift-drag selects a range. ⌘Z undoes.
-- **Render** runs `cut.py` with these settings and shows its log; the *Rendered* view plays the file, synced with the timeline and transcript.
+- **Live 9:16 preview** of the layout, title and captions, drawn from the source video without rendering. *Edit preview* plays the hook, the zoom into the clip, then the clip with your cuts and the pauses trimmed the way the render trims them.
+- **Side panel**: *Title*, *Layout* (Split, Focus, Fill, Fit; drag the webcam box when auto-detect picked the wrong face), *Trim and hook*, *Export*. The look (word captions, white title box, zoom into the clip, pause trimming, punch-in) is the same on every clip.
+- **Timeline**: thumbnails, the clip window and hook with draggable edges, cuts, kept parts and trimmed pauses. Shift-drag selects a range. ⌘Z undoes.
+- **Render** runs `cut.py` with these settings; the finished clip joins the posting queue and the Post page opens on it.
 
 Every render saves its options in the clip's `.json`, so the editor reopens a clip exactly as it was made.
 
@@ -140,18 +150,6 @@ Every render saves its options in the clip's `.json`, so the editor reopens a cl
 - **Split screen**: every stream plays side by side from the recording itself, with its live chat level over the last 3 minutes (the dashed line is the clip threshold). Click 🔇 to listen to one.
 - **Clips**: a clip is cut automatically when a chat explodes: 3× the usual number of *different people* chatting, held for 3+ seconds, at most 3 clips per stream per 10 minutes unless a bigger moment comes (the tile flashes), or press **Clip now** (keys 1–9) to clip what you just saw. Each clip lands in the feed on the right with an **Edit** link that opens it in the editor with the moment as its hook.
 - **Add stream**, **+1 h** and **Stop** work while it runs. Streams that drop reconnect by themselves. A `watch.py` started from the terminal shows up here too.
-
-**Live cursors.** Every window open on the same clip shows the others' cursors with their names, and edits sync between them. While a render runs, a `cut.py` cursor sits on the Render button and shows its stage.
-
-**Claude in the editor.** Scripted edits posted to `/api/agent` are performed in the open editor by a visible "Claude" cursor (select words, click Cut, pick a transition, render), so you watch the work and can undo any step:
-
-```
-curl -s localhost:8766/api/agent -H 'Content-Type: application/json' -d '{"clip": "<job>/<clip name>", "steps": [
-  {"do": "select", "text": "we gotta do a backflip"}, {"do": "cut"},
-  {"do": "set", "key": "transition", "value": "zoom"}, {"do": "render"}]}'
-```
-
-Steps: `say {text}`, `select {text}` or `select {a, b}` (source seconds), `cut`, `restore`, `keep`, `hook`, `start`, `end`, `hook_on`, `hook_off`, `set {key, value}` (layout, captions, title_style, transition, keep_after_tease), `title {text}`, `crop {box: [x, y, w, h]}`, `seek {t}`, `play`, `preview_transition`, `render`, `wait {ms}`.
 
 Windows, macOS or Linux, Python 3.10+. An NVIDIA GPU makes transcription faster; on the CPU a 12-minute video takes about 5 minutes.
 

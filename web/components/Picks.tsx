@@ -1,10 +1,11 @@
 "use client";
-// Picks: every moment Claude picked, across all extractions, grouped by video. Tick the ones worth posting and render
-// them in one go (extract.py --render-queue renders one at a time; a pick whose video isn't downloaded yet is fetched first).
+// Moments (on the Make page): every moment Claude picked, grouped by video, with Claude's verdict from looking at its
+// frames. The keeps are rendered and queued by themselves; render a "maybe" here when you want it too
+// (extract.py --render-queue; a pick whose video isn't downloaded yet is fetched first). Finished clips join the queue.
 import { useMemo, useState } from "react";
 import { api } from "@/lib/util";
 import { ago, editUrl, usePoll } from "@/lib/desk";
-import Nav, { Toast } from "./Nav";
+import { Toast } from "./Nav";
 import PickWatch, { WItem } from "./PickWatch";
 
 interface Clip { name: string; video: string; updated: number }
@@ -73,21 +74,12 @@ export default function Picks() {
   const byKey = new Map(all.map(x => [key(x.v.job, x.p.n), x]));
   const witems: WItem[] = (watch?.keys || []).map(k => byKey.get(k)).filter((x): x is { v: Video; p: Pick } => !!x).map(x => ({ job: x.v.job, video: x.v.title, p: x.p }));
   const back = (w: WItem) => byKey.get(key(w.job, w.p.n))!;
-  // Rank all: the groups on screen that Claude hasn't ranked yet (or whose ranking failed)
-  const groupsOn = (d?.videos || []).filter(v => v.picks.some(SHOW[filter]) && v.picks.some(p => !p.hidden));
-  const unranked = groupsOn.filter(v => !v.ranking || v.ranking.state === "failed");
-  const ranking = (d?.videos || []).filter(v => v.ranking?.state === "running" || v.ranking?.state === "queued").length;
   const allDrops = all.filter(x => x.p.rank?.verdict === "drop" && !x.p.hidden && !busy(x.p) && !x.p.clips.length);
-  const rankAll = () => api("/api/picks/rank", { jobs: unranked.map(v => v.job) })
-    .then((r: any) => { say(`Claude is ranking ${r.started} group${r.started === 1 ? "" : "s"}, three at a time`); reload(); }).catch(e => say(e.message));
-  const rankGroup = (v: Video) => api("/api/picks/rank", { job: v.job })
-    .then(() => { say("Claude is ranking these picks (about 30 s)"); reload(); }).catch(e => say(e.message));
   const cancel = (v: Video, p: Pick) => api("/api/picks/cancel", { job: v.job, n: p.n }).then(() => { say("Taken out of the queue"); reload(); }).catch(e => say(e.message));
 
   return (
-    <div className="desk">
-      <Nav>{!!working.length && <span className="lv-rec"><i />{working.every(x => x.p.queue?.op === "fetch") ? "Downloading" : "Rendering"} · {working.length} left</span>}</Nav>
-      <main className="dk-main">
+    <section id="moments">
+        <div className="dk-h">Moments{!!working.length && <span className="lv-rec"><i />{working.every(x => x.p.queue?.op === "fetch") ? "Downloading" : "Rendering"} · {working.length} left</span>}</div>
         <div className="pk-bar">
           <div className="seg">
             {([["todo", "To render"], ["done", "Rendered"], ["all", "All"], ["hidden", "Hidden"]] as [Filter, string][]).map(([f, n]) =>
@@ -96,10 +88,6 @@ export default function Picks() {
           <button className="pk-watch" disabled={!visible.length} onClick={() => openWatch()}>▶ Watch {visible.length}</button>
           {!!missing.length && <button className="btnx sm" onClick={() => fetchVideo(missing)} title="Some picks have no video on disk yet: download just their moments so they can be previewed">
             ⤓ Download {missing.length} missing</button>}
-          <button className={"pk-rank" + (ranking ? " busy" : "")} disabled={!unranked.length}
-            title="Claude ranks every group on this tab that isn't ranked yet, three groups at a time"
-            onClick={rankAll}>{ranking ? <><i className="dk-pulse" />Ranking {ranking} group{ranking === 1 ? "" : "s"}…</>
-              : unranked.length ? `✦ Rank all ${unranked.length} group${unranked.length === 1 ? "" : "s"}` : "✦ All ranked"}</button>
           {!!allDrops.length && <button className="btnx sm danger" title="Moves every pick Claude marked drop to the Hidden tab; you can restore them there"
             onClick={() => hide(allDrops, true)}>Hide all {allDrops.length} drops</button>}
           <span className="lv-grow" />
@@ -116,7 +104,7 @@ export default function Picks() {
         {now && <RenderBanner all={all} r={d?.renders || null} fetching={working.filter(x => x.p.queue?.state === "fetching").length} />}
 
         {!d ? <div className="lv-none">Loading…</div> : !visible.length ? <div className="lv-none">
-          {filter === "todo" ? <>Nothing left to render. Start an extraction on the <a href="/extract">Extract</a> page and Claude's picks land here.</>
+          {filter === "todo" ? "Nothing waiting. Start one above: Claude's picks land here, and the ones it keeps render by themselves."
             : filter === "done" ? "No rendered picks yet." : filter === "hidden" ? "No hidden picks." : "No picks yet."}
         </div> : d.videos.map(v => {
           const ps = v.picks.filter(SHOW[filter]).sort(byRank);
@@ -135,10 +123,6 @@ export default function Picks() {
                   <span>{v.channel || ""}{v.minutes ? ` · ${v.minutes} min` : ""} · picked {ago(v.picked, d.now)} · {v.picks.filter(isDone).length} of {v.picks.length} rendered
                     {v.url.startsWith("http") && <> · <a href={v.url} target="_blank" rel="noreferrer">source ↗</a></>}</span>
                 </div>
-                <button className={"pk-rank" + (rk?.state === "running" || rk?.state === "queued" ? " busy" : "")} disabled={rk?.state === "running" || rk?.state === "queued"}
-                  onClick={() => rankGroup(v)} title="Claude reads every pick's transcript, ranks them best first and marks the weak ones to drop">
-                  {rk?.state === "running" ? <><i className="dk-pulse" />Claude is ranking…</> : rk?.state === "queued" ? "Waiting to rank…"
-                    : rk?.state === "done" ? "✦ Re-rank" : "✦ Claude: rank these"}</button>
                 <button className="btnx sm" disabled={!free.length} onClick={() => free.forEach(p => toggle(key(v.job, p.n), !allOn))}>{allOn ? "Unselect" : "Select"} all {free.length}</button>
               </div>
               {rk?.state === "failed" && <div className="note warn">Ranking failed: {rk.error || "unknown error"}</div>}
@@ -159,12 +143,11 @@ export default function Picks() {
             </section>
           );
         })}
-      </main>
       {watch && !!witems.length && <PickWatch items={witems} at={watch.at} onClose={() => setWatch(null)}
         selected={w => sel.has(key(w.job, w.p.n))} onToggle={w => toggle(key(w.job, w.p.n))}
         onRender={w => render([back(w)])} onHide={w => hide([back(w)], !w.p.hidden)} onFetch={w => fetchVideo([back(w)])} />}
       <Toast m={msg} />
-    </div>
+    </section>
   );
 }
 

@@ -85,13 +85,20 @@ def main():
             continue
         job, _, name = it["id"].partition("/")
         clips.append({"id": it["id"], "title": it["title"], "hook": it.get("hook"), "creator": it["creator"],
-                      "seconds": it["duration"], "warnings": it.get("warnings") or [],
+                      "seconds": it["duration"], "layout": U.jload(ROOT / "jobs" / job / "edits" / f"{name}.json", {}).get("layout"),
+                      "warnings": list(dict.fromkeys((it.get("warnings") or []) + U.qa_warnings(it["id"]))),
                       "note": "rendered, not in the queue yet" if it["id"] in new else it.get("why"),
                       "source_age_hours": source_age(job), "said": spoken(job, name)})
     if not clips:
         status(state="done", finished=time.time(), count=0); print("nothing to rank"); return
     recent = sorted(posted, key=lambda x: -x["when"])[:8]
     learning = (ROOT / "learning.md").read_text(encoding="utf-8")[-2000:] if (ROOT / "learning.md").exists() else None
+    try:   # real numbers of the posts so far (scoreboard.csv): read them now, then show Claude the best and worst
+        import stats
+        stats.refresh()
+        numbers = stats.learning_examples(5)
+    except Exception:
+        numbers = ""
     prompt = f"""You run the posting order of a faceless GTA 6 clip page (TikTok, Reels, Shorts). Rank these unposted clips:
 which one should go out next, then after it, and so on. It's {time.strftime('%Y-%m-%d %H:%M')}, GTA 6 launch week.
 
@@ -103,7 +110,9 @@ What matters, in order:
 5. Warnings: a warning that says the clip must be re-cut, or anything that makes it a bad post, means hold.
 6. Not every clip deserves a post: hold the weak ones (no real hook or payoff, needs context, a near-duplicate of a
    better clip, spoilers/leaks) and say why in the reason. Holding a third of them is fine when they're weak.
-{"7. These rules from the page's own results override the above:" + chr(10) + learning if learning else ""}
+7. A warning starting "QA:" comes from a check of the finished clip's frames: "don't post" and "re-cut" both mean hold.
+{"8. These rules from the page's own results override the above:" + chr(10) + learning if learning else ""}
+{numbers}
 Most recent posts (newest first): {json.dumps([{k: r[k] for k in ("creator", "title", "on")} for r in recent], ensure_ascii=False)}
 
 Clips (said = what's spoken in the clip):
@@ -114,7 +123,7 @@ Reply with JSON only, no prose and no code fence: a list of every clip id above,
 """
     exe = os.environ.get("CLAUDE_BIN") or "claude"
     try:
-        r = subprocess.run([exe, "-p", prompt, "--model", os.environ.get("CLAUDE_MODEL_RANK", "haiku"), "--output-format", "json"], cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+        r = subprocess.run([exe, "-p", prompt, "--model", os.environ.get("CLAUDE_MODEL_RANK", "opus"), "--output-format", "json"], cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
         out = json.loads(r.stdout)
         text = out.get("result", "") if isinstance(out, dict) else ""
         m = re.search(r"\[.*\]", text, re.S)

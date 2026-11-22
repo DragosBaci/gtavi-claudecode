@@ -488,6 +488,14 @@ def find_cam(video, start=None, end=None):
                 "reason": f"no face stable across frames (best cluster {hits}/{len(frames)}, need {need})"}
     fx, fy, fw, fh = face
     fracface = [round(fx / w, 4), round(fy / h, 4), round(fw / w, 4), round(fh / h, 4)]
+    # a face whose pixels never change is a picture (game key art, a poster, a thumbnail), not the streamer
+    x0, y0, x1, y1 = max(0, int(fx)), max(0, int(fy)), min(w, int(fx + fw)), min(h, int(fy + fh))
+    if x1 - x0 > 4 and y1 - y0 > 4:
+        patch = np.array([cv2.cvtColor(f[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY) for f in frames]).astype(np.float32)
+        live = float(np.abs(np.diff(patch, axis=0)).mean())
+        if live < 1.2:
+            return {"mode": "none", "confidence": 0.0, "faces_seen": total, "face": fracface,
+                    "reason": f"the only stable face is a still picture (pixel change {live:.2f})"}
     if fw / w > 0.5:
         try:
             track = track_face(video, start, end, face)

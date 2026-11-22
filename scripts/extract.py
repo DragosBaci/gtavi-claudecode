@@ -5,7 +5,9 @@
   2. Claude        `claude -p` reads each transcript like the moment-finder skill and picks the moments worth
                    posting (start on a line that stands alone, payoff, 1-2 s hook, 3 titles) -> add_picks.py.
                    They show up in the editor as "New from pick". With --no-claude the top scored candidates are used.
-  3. cut.py        renders every pick: Split (webcam on top) when the streamer's face is on screen, Fit otherwise.
+  2b. review       Claude looks at 8 frames of every pick (frames.py) and ranks them keep / maybe / drop (rank()).
+  3. cut.py        renders only the keeps: Split (webcam on top) when the streamer's face is over gameplay, else
+                   Focus (a big window on the face or the action). Then Claude checks the finished clip's frames (qa()).
 
 Every video moves on by itself: as soon as one is transcribed Claude picks it (two at a time) and its picks are
 rendered (one at a time), while the others are still transcribing. Per-video control from the page: a file
@@ -20,7 +22,9 @@ unthrottled at any time by writing 1 or 0 to jobs/.extract/<run>/throttle (the E
 usage: python extract.py [URL ...] [--auto N] [--max-minutes 90] [--picks 5] [--power full|balanced|cool] [--no-claude] [--no-render]
        python extract.py --rerender <run>     render the picks of an earlier run that have no clip yet
        python extract.py --render-queue       work through the Picks page's render queue (see render_queue below)
-       python extract.py --rank <job>         Claude ranks one video's picks and marks the weak ones (jobs/<job>/picks_rank.json)
+       python extract.py --rank <job>         Claude ranks one video's picks, looking at their frames, and marks the weak
+                                              ones (jobs/<job>/picks_rank.json)
+       python extract.py --qa <job> <clip>    Claude checks a finished clip's frames (jobs/<job>/edits/<clip>.qa.json)
        python extract.py --rank-all <job> ... the same for several videos, three at a time
 """
 import argparse, json, os, re, signal, subprocess, sys, threading, time
@@ -34,6 +38,9 @@ from common import ROOT, job_dir, job_name, load_json, save_json  # noqa: E402
 RUNS = ROOT / "jobs" / ".extract"
 PY = sys.executable
 CLAUDE_MINUTES = 20   # per video
+# Claude's judgement (which videos, which moments, keep or drop, is the clip right) decides how good the page is, and
+# it is a handful of calls per video: the strongest model by default. CLAUDE_MODEL_PICK=sonnet to save usage.
+MODEL_PICK = os.environ.get("CLAUDE_MODEL_PICK", "opus")
 PICKERS = 2           # transcripts Claude reads at the same time
 DONE = ("done", "error", "skipped", "stopped")
 PROCS = {}            # job -> its running claude process (so Skip can stop it)
@@ -90,7 +97,7 @@ class Run:
         self.lock = threading.RLock()
         self.st = {"run": self.id, "pid": os.getpid(), "started": time.time(), "stage": "starting", "urls": [],
                    "opts": {"max_minutes": a.max_minutes, "picks": a.picks, "claude": not a.no_claude, "render": not a.no_render,
-                            "power": a.power, "auto": a.auto},
+                            "power": a.power, "auto": a.auto, "campaign": a.campaign},
                    "jobs": []}
         self.add(urls)
 
@@ -127,10 +134,44 @@ def sh(cmd, log, timeout=None):
             return -1
 
 
+def examples():
+    try:
+        import stats
+        return stats.learning_examples()
+    except Exception:
+        return ""
+
+
+def campaign_brief(run):
+    """For a campaign run: what the campaign pays for and its rules, so Claude picks moments that qualify."""
+    cid = (run.st.get("opts") or {}).get("campaign")
+    if not cid:
+        return ""
+    import campaigns
+    c = campaigns.get(cid)
+    if not c:
+        return ""
+    r = c.get("rules") or {}
+    lines = [f"\nThese clips are for the paid campaign \"{c['name']}\" ({c.get('rate_per_1k') or c.get('pool') or 'rate unknown'} per 1K views)."]
+    if c.get("creators"):
+        lines.append(f"It pays for clips of: {', '.join(c['creators'])}.")
+    if r.get("min_sec") or r.get("max_sec"):
+        lines.append(f"Finished clip length: {r.get('min_sec') or 0}-{r.get('max_sec') or 'any'} s.")
+    if r.get("banned"):
+        lines.append("Not allowed: " + "; ".join(r["banned"]) + ".")
+    if r.get("notes"):
+        lines.append("Rules: " + r["notes"])
+    if (c.get("rules_text") or "").strip():
+        lines.append("The campaign's own rules, as pasted:\n" + c["rules_text"].strip()[:3000])
+    lines.append("Only pick moments that follow these rules. The campaign's overlay is added at render.")
+    return "\n".join(lines) + "\n"
+
+
 def prompt(job, info, n):
     py = PY
+    ex = examples()
     return f"""You pick clip moments for a faceless GTA 6 clip page (TikTok, Reels, Shorts). Nobody is watching this run:
-don't ask questions, decide.
+don't ask questions, decide. The page posts only its best: a few great clips beat many good ones.
 
 Video: "{info.get('title')}" by {info.get('channel') or info.get('uploader')} ({info.get('webpage_url')}).
 Job folder: jobs/{job}
@@ -138,10 +179,18 @@ Job folder: jobs/{job}
 1. Read tool/skills/moment-finder/SKILL.md (how to pick) and tool/skills/hook-writer/SKILL.md (titles).
 2. Run: {py} tool/scripts/compact.py jobs/{job}
    Then read jobs/{job}/compact.txt (in parts if it is long), with jobs/{job}/candidates.md as hints only.
-3. Choose at most {n} moments you would actually watch to the end. Fewer is fine; zero is fine if nothing is good.
-   The tease (hook) is the culminating 1-2 s, never longer than 3 s, and it sits inside start-end.
+   Every line is [start-end] in exact source seconds: use them as they are for start, end and tease.
+   ▲ loudness spike (screams, laughs, explosions), ◆ chat spike (viewers reacted), ★ most replayed. A "... no speech"
+   line is a gap where only the picture talks (a stunt, a reveal): fine inside a clip when the line around it pays off.
+3. Choose at most {n} moments you would bet on: a stranger scrolling past would stop, watch to the end and share it.
+   Fewer is fine; zero is fine if nothing is good. Each needs a payoff you can point to (the punchline, the reaction,
+   the chaos, the reveal), not just a funny line in the middle of nothing.
+   The tease (hook) is required: the culminating 1-2 s (never over 3 s), inside start-end, near the end, that makes
+   sense with no context. Put its exact [start, end] from compact.txt.
+   Something must happen ON SCREEN: every pick gets a visual check next, and moments over a menu, a loading screen,
+   a paused game or a static screen get dropped. Prefer moments where the game shows the thing being talked about.
    Skip story spoilers, nudity, leaks, chat/donation reads and anything that needs context you can't see.
-4. Write them to jobs/{job}/picks_claude.json in the picks.json format from the skill ("job": "jobs/{job}",
+{ex}4. Write them to jobs/{job}/picks_claude.json in the picks.json format from the skill ("job": "jobs/{job}",
    tags C1, C2, ... in order of how good they are), then run:
    {py} tool/scripts/add_picks.py jobs/{job}/picks_claude.json
 5. Finish with one line per pick: tag, start-end (seconds), title. Don't render, post or touch other jobs.
@@ -153,7 +202,7 @@ def claude_pick(run, j, n):
     info = load_json(d / "info.json")
     log = run.dir / f"claude_{j['job']}.log"
     exe = os.environ.get("CLAUDE_BIN") or "claude"
-    cmd = [exe, "-p", prompt(j["job"], info, n), "--model", os.environ.get("CLAUDE_MODEL_PICK", "sonnet"),
+    cmd = [exe, "-p", prompt(j["job"], info, n) + campaign_brief(run), "--model", MODEL_PICK,
            "--output-format", "stream-json", "--verbose",
            "--allowedTools", "Read", "Glob", "Grep", f"Edit(jobs/{j['job']}/**)", f"Write(jobs/{j['job']}/**)",
            f"Bash({PY} tool/scripts/compact.py:*)", f"Bash({PY} tool/scripts/add_picks.py:*)"]
@@ -216,16 +265,36 @@ def hook_args(job, n):
     return ["--tease", f"{max(a, b - 2):.2f}:{b:.2f}"] if b - a > 4 else ["--no-tease"]
 
 
-def render(run, j, pick, log=None):
-    """Split layout if the streamer's face is on screen, else Fit. Returns the clip name or None."""
+def render(run, j, pick, log=None, check=True):
+    """Split layout if the streamer's face is on screen, else Focus (cut.py picks the face or the action).
+    Then Claude checks the finished clip (qa); a clip that passes goes straight into the posting queue.
+    Returns the clip name or None."""
+    name = _render(run, j, pick, log)
+    if name and check:
+        with open(log or run.dir / "render.log", "a", encoding="utf-8") as f:
+            f.write("stage: qa t=9999\n")   # for the Picks page's progress bar (the last stage)
+        r = qa(j["job"], name)
+        with open(log or run.dir / "render.log", "a", encoding="utf-8") as f:
+            f.write(f"qa {j['job']}/{name}: {r.get('verdict')} {'; '.join(r.get('issues') or []) or r.get('error') or ''}\n")
+    if name and (not check or r.get("verdict") not in ("fix", "bad")):   # passed: straight into the posting queue
+        try:
+            import uploader
+            uploader.enqueue(j["job"], name)
+        except (SystemExit, Exception) as ex:
+            print(f"couldn't queue {j['job']}/{name}: {ex}", flush=True)
+    return name
+
+
+def _render(run, j, pick, log=None):
     name = f"pick_{pick['n']}"
+    import campaigns
+    camp = campaigns.for_render(j["job"], force=(getattr(run, "st", None) or {}).get("opts", {}).get("campaign"))
     base = [PY, str(HERE / "cut.py"), f"jobs/{j['job']}", "--set", "candidates_audit", "--pick", str(pick["n"]), "--name", name,
-            "--title", pick.get("title") or "", *hook_args(j["job"], pick["n"])]
+            "--title", pick.get("title") or "", *hook_args(j["job"], pick["n"]), *campaigns.render_args(camp)]
     log = log or run.dir / "render.log"
-    if sh(base + ["--layout", "react", "--or-blur"], log) == 0:   # no face: cut.py makes it a Fit clip in the same run
+    if sh(base + ["--layout", "react", "--or-blur"], log) == 0:   # no face over gameplay: cut.py makes it Focus in the same run
         return name
-    # Fit draws its text as the hook box (--title only shows in Split)
-    return name if sh(base + ["--layout", "blur"] + (["--hook", pick["title"]] if pick.get("title") else []), log) == 0 else None
+    return name if sh(base + ["--layout", "track"], log) == 0 else None
 
 
 def rerender(run_id):
@@ -236,7 +305,7 @@ def rerender(run_id):
     run.st.update(pid=os.getpid(), stage="rendering"); run.save()
     start_throttle(run, (run.dir / "throttle").exists() and (run.dir / "throttle").read_text().strip() == "1")
     for j in run.st["jobs"]:
-        todo = [p for p in j["picks"] if not p.get("clip")]
+        todo = [p for p in j["picks"] if not p.get("clip") and not p.get("skipped")]   # not the ones Claude didn't keep
         if not todo:
             continue
         run.set(j, stage="rendering")
@@ -284,7 +353,7 @@ def choose(run, n, minutes, have):
             lf.write(f"Claude is choosing {n} of {len(rows)} trending videos…\n"); lf.flush()
             try:
                 out = subprocess.run([exe, "-p", CHOOSE.format(n=n, minutes=minutes, rows=table), "--model",
-                                      os.environ.get("CLAUDE_MODEL_PICK", "sonnet"), "--output-format", "json"],
+                                      MODEL_PICK, "--output-format", "json"],
                                      cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=240).stdout
                 text = json.loads(out).get("result") or ""
                 m = re.search(r"\[.*\]", text, re.S)
@@ -305,7 +374,8 @@ def choose(run, n, minutes, have):
 
 
 def pick_job(run, j, a, render_pool, futures):
-    """Claude (or the top scores) picks this video's moments, then its picks go to the render queue."""
+    """Claude (or the top scores) picks this video's moments, Claude looks at their frames and keeps the best, then
+    only the keeps go to the render queue (the rest stay on the Picks page, with Claude's verdict)."""
     if j["stage"] in DONE:
         return
     run.set(j, stage="picking")
@@ -317,22 +387,46 @@ def pick_job(run, j, a, render_pool, futures):
     with run.lock:
         j["picks"] = [{"n": x["n"], "tag": x.get("tag"), "title": x.get("title"), "start": x["start"], "end": x["end"],
                        "clip": None, "error": None} for x in new]
-    note = f"{len(new)} moment(s)" if new else "no moment worth clipping"
-    if not new or a.no_render:
+    if not new:
+        return run.set(j, stage="done", note="no moment worth clipping")
+    keep = new
+    if not a.no_claude:
+        run.set(j, stage="reviewing", note=f"Claude is looking at the frames of {len(new)} moment(s)")
+        ranks = rank(j["job"], fetch=True)   # every pick judged with its frames
+        if j["stage"] in DONE:
+            return
+        if ranks:
+            with run.lock:
+                for p in j["picks"]:
+                    rk = ranks.get(p["n"]) or {}
+                    p.update(verdict=rk.get("verdict"), why=rk.get("why"))
+                    if rk.get("verdict") != "keep":
+                        p["skipped"] = True
+            keep = [x for x in new if (ranks.get(x["n"]) or {}).get("verdict") == "keep"]
+        else:   # the review failed: render them all rather than lose the run
+            run.set(j, note="the visual review failed (see picks_rank.json): rendering every pick")
+    note = (f"kept {len(keep)} of {len(new)} moment(s)" if keep else
+            f"Claude kept none of the {len(new)} moment(s): see the Picks page")
+    if not keep or a.no_render:
         return run.set(j, stage="done", note=note)
     run.set(j, stage="picked", note=note)
-    futures.append(render_pool.submit(render_job, run, j))
+    futures.append(render_pool.submit(render_job, run, j, {x["n"] for x in keep}))
 
 
-def render_job(run, j):
+def render_job(run, j, only=None):
     if j["stage"] in DONE:
         return
     run.set(j, stage="rendering")
     for p in j["picks"]:
         if j["stage"] in DONE:
             return
-        p["clip"] = render(run, j, p)
+        if only is not None and p["n"] not in only:
+            continue
+        p["clip"] = render(run, j, p, check=run.st["opts"].get("claude", True))
         p["error"] = None if p["clip"] else "render failed: see render.log"
+        if p["clip"]:
+            p["qa"] = (load_json(ROOT / "jobs" / j["job"] / "edits" / f"{p['clip']}.qa.json")
+                       if (ROOT / "jobs" / j["job"] / "edits" / f"{p['clip']}.qa.json").exists() else None)
         run.save()
     run.set(j, stage="done")
 
@@ -430,6 +524,12 @@ def ensure_video(job, n, pad=2.0):
     if p.get("file") and (ROOT / p["file"]).exists():
         return True
     info = load_json(d / "info.json")
+    if not str(info.get("webpage_url", "")).startswith("http"):   # a local file: nothing to download
+        if Path(info.get("webpage_url", "")).is_file():
+            with CAND_LOCK:
+                c = load_json(d / "candidates_audit.json"); c["source"] = info["webpage_url"]; save_json(d / "candidates_audit.json", c)
+            return True
+        return False
     t = p.get("tease") or [p["start"], p["end"]]
     s, e = max(0.0, min(p["start"], t[0]) - pad), max(p["end"], t[1]) + pad
     out = d / "sections" / f"audit_{n}.mp4"
@@ -546,22 +646,28 @@ def render_queue():
         st["pid"] = None; save()
 
 
-RANK = """You judge clip picks for a faceless GTA 6 clip page (TikTok, Reels, Shorts). Nobody is watching this run:
-don't ask questions, don't use tools, decide.
+RANK = """You judge clip picks for a faceless GTA 6 clip page (TikTok, Reels, Shorts) that posts only its best clips.
+Nobody is watching this run: don't ask questions, decide.
 
 Video: "{title}" by {channel}.
-Below are the moments picked from it. For each: its tag, length, the title it would be posted with, and what is said
-(the transcript of the moment; the finished clip opens with the "hook" line, then plays the moment from the start).
+Below are the moments picked from it. For each: its tag, length, the title it would be posted with, the hook (the
+finished clip opens with that line, then plays the moment from its start), what is said, and FRAMES: an image of 8
+frames from the moment (first = the hook frame when there is one) with picture stats (motion: how much the picture
+changes, about 0-40; static: share of the moment where nothing moves).
 
+First Read every frames image listed below. Judge the picture as hard as the words: these are video clips.
 Rank them all, best first, as clips a stranger scrolling would watch to the end and share. Judge:
-- the first 2 seconds: does the hook grab without context?
+- the first 2 seconds: do the hook line AND the hook frame grab without context?
 - a real payoff (a joke landing, a reaction, chaos, a reveal), not a setup that fizzles
+- the picture: something happens on screen that matches what is said. Menus, loading screens, a paused game,
+  a static screen or a talking head with nothing happening (static over ~60%) are drops unless the line is
+  exceptional; tiny unreadable action is a minus
 - understandable on its own; no story spoilers, leaks, chat/donation reads, nothing that needs the rest of the video
-- the title: specific and curious, not generic
+- the title: specific and curious, not generic, true to what the frames show
 - near-duplicates: if two picks are the same moment or the same joke, keep the better one and drop the other
-Verdict per pick: "keep" (worth rendering), "maybe" (fine if there's room), "drop" (not worth posting: say why).
-Be honest: dropping half of them is fine when they're weak.
-
+Verdict per pick: "keep" (you'd bet on it: it gets rendered and posted), "maybe" (decent, not top), "drop" (not
+worth posting: say why). Be strict: only keep what you'd be proud to post. Dropping most of them is fine.
+{examples}
 {picks}
 
 Answer with only a JSON array, best first, one entry per pick:
@@ -569,9 +675,30 @@ Answer with only a JSON array, best first, one entry per pick:
 """
 
 
-def rank(job):
-    """Claude ranks a video's picks (not the hidden ones) -> jobs/<job>/picks_rank.json:
-    {"state": "running"|"done"|"failed", "pid", "at", "ranks": {n: {"rank", "verdict", "why"}}, "error"}."""
+def pick_frames(d, c, p):
+    """The pick's frame strip + picture stats (frames.py), cached in jobs/<id>/review/ (None: no video yet)."""
+    import frames
+    cache = d / "review" / "stats.json"
+    st = load_json(cache) if cache.exists() else {}
+    key = f"{p['n']}:{p['start']}:{p['end']}:{p.get('tease')}"
+    if st.get(str(p["n"]), {}).get("key") == key and Path(st[str(p["n"])].get("sheet") or "").exists():
+        return st[str(p["n"])]
+    try:
+        r = frames.pick_sheet(d, c, p)
+    except Exception as ex:
+        print(f"frames for #{p['n']} failed: {ex}", flush=True)
+        r = None
+    if r and r.get("sheet"):
+        st = load_json(cache) if cache.exists() else {}
+        st[str(p["n"])] = dict(r, key=key)
+        save_json(cache, st)
+    return r
+
+
+def rank(job, fetch=False):
+    """Claude ranks a video's picks (not the hidden ones), looking at their frames -> jobs/<job>/picks_rank.json:
+    {"state": "running"|"done"|"failed", "pid", "at", "ranks": {n: {"rank", "verdict", "why", "motion", "static"}}, "error"}.
+    fetch: download the video of picks that don't have it yet, so every pick is judged with its frames."""
     d = ROOT / "jobs" / job
     out = d / "picks_rank.json"
     prev = load_json(out) if out.exists() else {}
@@ -584,18 +711,32 @@ def rank(job):
         ps = [p for p in c["candidates"] if p["n"] not in hidden]
         if not ps:
             raise ValueError("no picks to rank")
-        blocks = []
+        if fetch:
+            with ThreadPoolExecutor(3) as ex:
+                list(ex.map(lambda p: ensure_video(job, p["n"]), ps))
+            c = load_json(d / "candidates_audit.json")
+            ps = [p for p in c["candidates"] if p["n"] not in hidden]
+        blocks, seen = [], {}
         for p in ps:
             t = p.get("tease")
             a, b = min(p["start"], t[0]) if t else p["start"], max(p["end"], t[1]) if t else p["end"]
             said = " ".join(w["w"] for w in words if a <= w["s"] <= b)[:1400] or p.get("text") or ""
             hook = " ".join(w["w"] for w in words if t and t[0] <= w["s"] <= t[1])
+            fr = pick_frames(d, c, p)
+            seen[p["n"]] = fr or {}
+            if fr and fr.get("sheet"):
+                rel = Path(fr["sheet"]).resolve().relative_to(ROOT.resolve()) if Path(fr["sheet"]).resolve().is_relative_to(ROOT.resolve()) else fr["sheet"]
+                frm = f"FRAMES: {rel} (motion {fr.get('motion')}, static {round(100 * (fr.get('static_share') or 0))}%)"
+            else:
+                frm = "FRAMES: none (video not downloaded yet): judge on the words, at most \"maybe\""
             blocks.append(f"n={p['n']} · {p.get('tag') or ''} · {round(p['end'] - p['start'])} s · title: {p.get('title') or '(none)'}\n"
-                          f"hook: {hook or '(no words)'}\nsaid: {said}")
-        prompt = RANK.format(title=info.get("title"), channel=info.get("channel") or info.get("uploader"), picks="\n\n".join(blocks))
+                          f"hook: {hook or '(no words)'}{' (auto: the loudest moment)' if p.get('tease_auto') else ''}\n"
+                          f"said: {said}\n{frm}")
+        prompt = RANK.format(title=info.get("title"), channel=info.get("channel") or info.get("uploader"),
+                             picks="\n\n".join(blocks), examples=examples())
         exe = os.environ.get("CLAUDE_BIN") or "claude"
-        r = subprocess.run([exe, "-p", prompt, "--model", os.environ.get("CLAUDE_MODEL_PICK", "sonnet"), "--output-format", "json"],
-                           cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+        r = subprocess.run([exe, "-p", prompt, "--model", MODEL_PICK, "--output-format", "json", "--allowedTools", "Read"],
+                           cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)
         text = json.loads(r.stdout).get("result") or ""
         m = re.search(r"\[.*\]", text, re.S)
         known = {p["n"] for p in ps}
@@ -605,17 +746,71 @@ def rank(job):
             if n in known and n not in ranks:
                 k += 1
                 v = x.get("verdict") if x.get("verdict") in ("keep", "maybe", "drop") else "maybe"
-                ranks[n] = {"rank": k, "verdict": v, "why": str(x.get("why") or "")[:160]}
+                ranks[n] = {"rank": k, "verdict": v, "why": str(x.get("why") or "")[:160],
+                            "motion": seen.get(n, {}).get("motion"), "static": seen.get(n, {}).get("static_share")}
         if not ranks:
             raise ValueError("Claude's answer had no ranking in it")
         save_json(out, {"state": "done", "at": time.time(), "ranks": ranks, "of": len(ps)})
+        return ranks
     except Exception as e:
         save_json(out, {"state": "failed", "at": time.time(), "error": str(e)[-300:], "ranks": prev.get("ranks")})
+        return None
+
+
+QA = """You check a finished vertical clip before a GTA 6 clip page (TikTok, Reels, Shorts) posts it.
+Nobody is watching this run: don't ask questions, decide.
+
+Read the image {sheet}: 8 frames of the finished 1080x1920 clip, at {times} s (labelled). Title: "{title}".
+Picture stats: motion {motion} (about 0-40), static {static}% of the clip, frozen stretches {frozen} s, black {black} s.
+Layout: {layout}. Length {dur} s.
+
+Check, as a viewer would see it on a phone:
+1. The first frame (0.3 s) grabs: something is happening and the hook/title is readable.
+2. The subject (the streamer's face, the action) is in frame and not cut off or tiny.
+3. Captions and the title are readable and don't cover the face or the key action.
+4. The title is spelled right and true to what the frames show.
+5. No black, frozen or static stretches; no stream overlay (chat, alerts) dominating the picture.
+6. Nothing that can't be posted: nudity, leaks, slurs on screen.
+Verdict: "ok" (post it), "fix" (a re-cut would fix it: say what), "bad" (don't post).
+
+Answer with only JSON: {{"verdict": "ok"|"fix"|"bad", "issues": ["<short>", ...], "first_frame": <1-10>}}
+"""
+
+
+def qa(job, name):
+    """Claude looks at frames of the finished clip -> jobs/<job>/edits/<name>.qa.json (the queue shows its issues as
+    warnings and the re-rank holds clips marked "fix" or "bad")."""
+    import frames
+    d = ROOT / "jobs" / job
+    out = d / "edits" / f"{name}.qa.json"
+    try:
+        meta = load_json(d / "edits" / f"{name}.json")
+        st = frames.clip_sheet(d, name)
+        rel = Path(st["sheet"]).resolve().relative_to(ROOT.resolve())
+        prompt = QA.format(sheet=rel, times="0.3, 1.2, then 6 evenly spread", title=meta.get("title") or meta.get("hook") or "",
+                           motion=st.get("motion"), static=round(100 * (st.get("static_share") or 0)),
+                           frozen=st.get("frozen") or "none", black=st.get("black") or "none",
+                           layout=meta.get("layout"), dur=st.get("duration"))
+        exe = os.environ.get("CLAUDE_BIN") or "claude"
+        r = subprocess.run([exe, "-p", prompt, "--model", MODEL_PICK, "--output-format", "json", "--allowedTools", "Read"],
+                           cwd=str(ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
+        text = json.loads(r.stdout).get("result") or ""
+        m = re.search(r"\{.*\}", text, re.S)
+        res = json.loads(m.group(0))
+        res = {"verdict": res.get("verdict") if res.get("verdict") in ("ok", "fix", "bad") else "fix",
+               "issues": [str(x)[:140] for x in res.get("issues") or []][:6], "first_frame": res.get("first_frame"),
+               "stats": {k: st.get(k) for k in ("motion", "static_share", "frozen", "black")}, "at": time.time()}
+    except Exception as e:
+        res = {"verdict": None, "error": str(e)[-300:], "at": time.time()}
+    save_json(out, res)
+    return res
 
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--rank":
         return rank(sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == "--qa":
+        return print(json.dumps(qa(sys.argv[2], sys.argv[3])))
     if len(sys.argv) >= 3 and sys.argv[1] == "--rank-all":
         with ThreadPoolExecutor(3) as ex:
             list(ex.map(rank, sys.argv[2:]))
@@ -632,6 +827,8 @@ def main():
     ap.add_argument("--no-claude", action="store_true", help="use the scored candidates instead of Claude's picks")
     ap.add_argument("--no-render", action="store_true", help="only pick; render later in the editor")
     ap.add_argument("--power", choices=list(PIPELINE_POWER), default="full", help="how hard to run the machine (see above)")
+    ap.add_argument("--campaign", help="make these clips for a joined paid campaign (campaigns.json id): Claude picks by its "
+                                       "rules and every clip is rendered with its overlay")
     a = ap.parse_args()
     if not a.urls and not a.auto:
         ap.error("give video links or --auto N")

@@ -19,8 +19,18 @@ Read pages live. Do not rely on memory; payouts and budgets change daily.
    - link
    - date checked
 3. Write or update a row per campaign in `campaigns.md`. If a value is not visible on the page, write `unknown`. Never estimate or invent a number.
+3b. Keep `campaigns.json` (what the desk's Earn page, the renders and the uploader use) in step, one entry per campaign:
+   `{"id": "<site>-<short-name>", "name", "site": "contentrewards"|"clip"|"whop", "url", "submit_url": null,
+   "creators": [<channel / streamer names whose content it pays for>], "any_gta": <true when any GTA 6 streamer counts>,
+   "platforms": [<"tiktok","youtube","instagram">], "rate_per_1k": <number or null>, "pool": <"$10K pool..." or null>,
+   "budget": "<as shown>", "fee": <0.10 on Content Rewards, else 0>, "status": "live"|"ended", "checked": "<date>",
+   "joined": false, "rules": {<min_sec, max_sec, overlay_required, overlay_position, min_payout, max_payout, notes>},
+   "rules_text": "", "warning": <sponsor or platform risk, or null>}`.
+   Update existing entries in place and **never** touch `joined`, `joined_at`, `rules_text`, `submit_url` or rules the human
+   pasted: those are theirs. An ended campaign gets `"status": "ended"`, it isn't deleted.
 4. Rules that sit behind a login: tell the human which campaign and ask them to paste the rules text. Save it into `campaigns.md` under that campaign. Do not try to sign in, join, or accept terms for them.
 5. Skip any campaign that asks for leaks, "play early", piracy, GTA Online money or AFK bots, or fake accounts. Say why in one line.
 6. Report a short ranked list: campaign, rate, budget left, effort. No earnings promises: pay depends on approved views and each campaign's own rules.
 
-The human joins campaigns and submits clips. You prepare and check the clips.
+The human joins campaigns (on the campaign's own page) and ticks them on the Earn page with the rules pasted. From then on
+the desk renders those creators' clips with the campaign's overlay, posts them first, and `campaign-submit` sends the links.

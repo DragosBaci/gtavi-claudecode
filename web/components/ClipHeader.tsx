@@ -1,32 +1,23 @@
 "use client";
 import { openClip } from "@/lib/actions";
 import { LNAME } from "@/lib/constants";
-import { ME, renameMe } from "@/lib/presence";
 import { setEd, useEd } from "@/lib/store";
 import { fmt } from "@/lib/util";
-import { useState } from "react";
 import { I } from "./Icons";
 
-/** Top left: the clip picker and who else is here. */
+/** Top left: the clip picker and the way back to the desk. */
 export default function ClipHeader() {
-  const P = useEd(s => s.P), clips = useEd(s => s.clips), menu = useEd(s => s.menu), peers = useEd(s => s.peers);
-  const [, bump] = useState(0);
+  const P = useEd(s => s.P), clips = useEd(s => s.clips), menu = useEd(s => s.menu);
   const open = menu === "clip";
-  const people = peers.filter(p => !p.ghost);
   return (
     <>
       <div className="lhead">
         <button className="pill" id="clipBtn" onClick={e => { e.stopPropagation(); setEd({ menu: open ? null : "clip" }); }}>
           {I.plus}<span className="t">{P ? P.state.title || P.name : "Open a clip"}</span>{I.chevDown}
         </button>
-        <a className="pill" href="/" title="Clip Desk: Extract, Live, Queue" style={{ textDecoration: "none", fontSize: 13, padding: "6px 11px" }}>
+        <a className="pill" href="/" title="Back to the desk: Make, Post, Live" style={{ textDecoration: "none", fontSize: 13, padding: "6px 11px" }}>
           <i style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--lime)" }} />Desk
         </a>
-        <div className="peers">
-          {ME.name && <i className="me" title={`You (${ME.name}) · click to rename`} style={{ background: ME.color }}
-            onClick={() => { const n = prompt("Your name on other people's screens", ME.name); if (n && n.trim()) { renameMe(n); bump(x => x + 1); } }}>{ME.name[0]}</i>}
-          {people.map(p => <i key={p.sid} title={p.name} style={{ background: p.color }}>{p.name[0]}</i>)}
-        </div>
         <div className={"menu" + (open ? " open" : "")} id="clipMenu" onClick={e => e.stopPropagation()}>
           {!clips.length && <div className="grp">No clips yet</div>}
           {clips.map(j => (

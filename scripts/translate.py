@@ -128,6 +128,8 @@ def main():
     cands = load_json(d / "candidates.json")
     s0, e0 = meta["start"], meta["end"]
     layout = a.layout or meta.get("layout", "blur")
+    if layout not in ("fill", "blur", "facecam"):   # Split / Focus / Brainrot need cut.py's analysis: use Fit here
+        layout = "blur"
     cam = a.cam or "0.70:0.68:0.30:0.32"
     hook = a.hook if a.hook is not None else meta.get("hook", "")
     credit = ""

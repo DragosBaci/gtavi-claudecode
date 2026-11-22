@@ -10,11 +10,8 @@ export interface ClipState {
   keep: Range[]; drop: Range[];
   cam: string; layout: string; title: string; title_style: string; captions: string;
   transition: string; tighten: number; keep_after_tease: boolean; punch: boolean; trim: boolean;
-  filler?: string; split?: number;   // brainrot layout: bottom video (fillers/<name>.mp4), clip's share of the height
-  filler_start?: number | null;
   title_secs?: number;                // the title disappears after this many seconds of the final clip (0 = never)       // second of the bottom video the clip starts on (previewed = rendered)
 }
-export interface Filler { name: string; url: string; dur: number; w: number; h: number }
 
 export interface Rendered {
   url: string; segments: any[]; tease: Range | null; dur: number; fps: number; updated: number;
@@ -25,7 +22,9 @@ export interface Project {
   job: string; name: string; set: string; pick: number;
   video: { url: string; offset: number; dur: number; w: number; h: number; fps: number };
   words: Word[]; state: ClipState; titles: string[]; game_x: number | null;
-  rendered: Rendered | null; is_new: boolean; fillers?: Filler[];
+  /** Focus layout of the last render (cut.py/focus.py): crop in source px; x is a number or a moving expression. */
+  focus?: { mode: string; w: number; h: number; x: number | string; y: number | string; path?: [number, number][] } | null;
+  rendered: Rendered | null; is_new: boolean;
   source: { title: string; channel: string };
 }
 
@@ -35,8 +34,7 @@ export interface ClipGroup {
   picks: { set: string; n: number; tag: string; title: string; start: number; end: number }[];
 }
 
-export interface Peer { sid: string; name: string; color: string; cursor: any; action: string | null; ghost?: boolean }
 export interface RenderStatus { state: "running" | "done" | "error"; stage: string; elapsed: number; log?: string[]; output?: string; id?: string }
 
 export type Mode = "edit" | "free" | "rendered";
-export type Tab = "claude" | "captions" | "text" | "layout" | "transitions" | "hook" | "trim" | "export";
+export type Tab = "text" | "layout" | "trim" | "export";

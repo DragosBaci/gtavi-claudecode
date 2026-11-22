@@ -1,5 +1,5 @@
 // The 9:16 live preview: cut.py's layouts, title box, word captions and hook transitions, drawn on a canvas.
-import { CAP_PX, CAP_Y, H, K, TITLE_PX, TITLE_Y, TOP, W } from "./constants";
+import { CAP_PX, CAP_Y, FOCUS_H, FOCUS_Y, H, K, TITLE_PX, TITLE_Y, TOP, W } from "./constants";
 import { E, tNow } from "./engine";
 import { editPos, plan } from "./plan";
 import { ed } from "./store";
@@ -7,24 +7,6 @@ import { clamp, inside } from "./util";
 
 export const PV = { cv: null as HTMLCanvasElement | null };
 
-// brainrot layout: the filler video under the clip, kept in step with the edit like cut.py renders it:
-// output second t of the clip shows second (filler_start + t) of the filler (it loops)
-const fill: { el?: HTMLVideoElement; name?: string } = {};
-function fillerVideo(name: string | undefined, start: number | null | undefined) {
-  const { P, S, playing, mode } = ed(); const list = P?.fillers || [];
-  const f = list.find(x => x.name === name); if (!f || !P || !S) return null;
-  if (!fill.el) { const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto"; fill.el = v; }
-  const v = fill.el;
-  if (fill.name !== f.name) { fill.name = f.name; v.src = f.url; }
-  if (v.readyState < 1) return v;
-  const out = mode === "edit" ? editPos(P, S, tNow(), playing, E.pi) : null;
-  const want = ((start || 0) + Math.max(0, out ?? 0)) % (v.duration || f.dur);
-  const on = playing && mode === "edit" && out != null;
-  if (on) { if (v.paused) v.play().catch(() => {}); if (Math.abs(v.currentTime - want) > 0.4) v.currentTime = want; }
-  else { if (!v.paused) v.pause(); if (Math.abs(v.currentTime - want) > 0.05 && !v.seeking) v.currentTime = want; }
-  return v;
-}
-function stopFiller() { if (fill.el && !fill.el.paused) fill.el.pause(); }
 const off: { A?: HTMLCanvasElement; B?: HTMLCanvasElement; S?: HTMLCanvasElement } = {};
 function offscreen() {
   if (!off.A) { off.A = document.createElement("canvas"); off.B = document.createElement("canvas"); off.S = document.createElement("canvas"); off.A.width = off.B!.width = 540; off.A.height = off.B!.height = 960; }
@@ -65,22 +47,24 @@ function drawScene(c: CanvasRenderingContext2D, src: HTMLVideoElement, t: number
     c.filter = "none";
     if (!cb) { c.fillStyle = "rgba(0,0,0,.55)"; c.fillRect(0, ph - 64, W, 64); c.fillStyle = "#fff"; c.font = "600 30px -apple-system,sans-serif"; c.textAlign = "center"; c.fillText("Track ON: the webcam is found at render", W / 2, ph - 22); }
     if (S.title && L === "react" && titleOn()) drawTitle(c, S.title, TOP, S.title_style);
-  } else if (L === "split") {
-    const th = Math.round((H * (S.split || 0.5)) / 2) * 2, bh = H - th, fv = fillerVideo(S.filler, S.filler_start);
-    cover(c, src, 0, 0, sw, sh, 0, 0, W, th);
-    c.filter = "none";
-    if (fv && fv.readyState >= 2) cover(c, fv, 0, 0, fv.videoWidth, fv.videoHeight, 0, th, W, bh);
-    else { c.fillStyle = "#15110f"; c.fillRect(0, th, W, bh); c.fillStyle = "#8a7d78"; c.font = "600 34px -apple-system,sans-serif"; c.textAlign = "center"; c.fillText(fv ? "loading the bottom video…" : "put a video in fillers/", W / 2, th + bh / 2); }
-    if (S.title && titleOn()) drawTitle(c, S.title, 30, "outline");   // cut.py: outline title at the top
   } else if (L === "fill") {
     cover(c, src, 0, 0, sw, sh, 0, 0, W, H);
+  } else if (L === "track") {
+    // Focus: blurred frame behind, a 4:5 window in front. After a render, the window the render used (a moving
+    // window is shown at its middle position); before, the centre (the render aims it at the face or the action).
+    c.filter = (E.rewindUntil ? "saturate(0.6) " : "") + "blur(22px) brightness(0.85)"; cover(c, src, 0, 0, sw, sh, -40, -40, W + 80, H + 80); c.filter = E.rewindUntil ? "saturate(0.6)" : "none";
+    const fo = P.focus && typeof P.focus.w === "number" && P.focus.w <= sw && P.focus.h <= sh ? P.focus : null;
+    const ch = fo ? fo.h : sh, cw = fo ? fo.w : Math.min(sw, sh * W / FOCUS_H);
+    const xs = fo?.path?.map(p => p[1]).sort((a, b) => a - b);
+    const cx = fo && typeof fo.x === "number" ? fo.x : xs?.length ? xs[xs.length >> 1] : (sw - cw) / 2;
+    const cy = fo && typeof fo.y === "number" ? fo.y : (sh - ch) / 2;
+    c.drawImage(src, cx, cy, cw, ch, 0, FOCUS_Y, W, FOCUS_H);
   } else {
     c.filter = (E.rewindUntil ? "saturate(0.6) " : "") + "blur(22px) brightness(0.85)"; cover(c, src, 0, 0, sw, sh, -40, -40, W + 80, H + 80); c.filter = E.rewindUntil ? "saturate(0.6)" : "none";
     const fh = W * sh / sw; c.drawImage(src, 0, 0, sw, sh, 0, (H - fh) / 2 - 80, W, fh);
   }
   c.filter = "none";
   if (S.title && TITLE_Y[L] != null && titleOn()) drawTitle(c, S.title, TITLE_Y[L], S.title_style);   // Gameplay, Fill, Fit
-  if (L !== "split") stopFiller();
   if (!E.rewindUntil && S.captions !== "none") drawCaption(c, t, L);
 }
 

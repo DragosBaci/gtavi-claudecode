@@ -1,7 +1,7 @@
 "use client";
-// Queue: the posting queue (clips added here, plus an optional hand-ranked queue/queue.json). Select a clip to watch it, edit its text per
-// platform, mark it posted, skip it for the auto-uploader or open it in the editor. Unqueued clips can be added.
-// Text edits are saved to queue/overrides.json, which the auto-uploader uses too.
+// Post: the posting queue. Every clip Claude kept and checked lands here by itself (and every clip you render in the
+// editor). Select one to watch it, edit its text per platform, post it now, move it to the front, or remove it.
+// The auto-uploader (upload-next) decides the order when it posts. Text edits go to queue/overrides.json, which it uses too.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/util";
 import { ago, editUrl, usePoll } from "@/lib/desk";
@@ -14,12 +14,13 @@ interface Item {
   format: string; source_url: string; source_title: string; platforms: Record<string, Record<string, string>>;
   job: string; name: string; video: string | null; state: Partial<Record<Plat, PState>>; skipped: { reason: string; at: string } | null; added: boolean;
   rank_reason?: string | null; hold?: boolean; pinned?: boolean;
+  campaigns?: { id: string; name: string; rate: number | null; pool: string | null; eligible: boolean; problems: string[] }[];
 }
-interface Other { id: string; job: string; name: string; title: string; creator: string | null; video: string; updated: number; layout: string | null }
-interface Rerank { state?: string; running: boolean; started?: number; finished?: number; error?: string | null; count?: number; added?: number; held?: number; order_at?: number | null }
+const paid = (i: Item) => (i.campaigns || []).filter(c => c.eligible);
+const pay = (i: Item) => Math.max(0, ...paid(i).map(c => c.rate || 0.01));
 interface PostNow { state?: string; running: boolean; id?: string; started?: number; finished?: number | null; result?: string; posted?: string[]; error?: string | null; log: string[] }
 interface Account { name: string; handles: string[] }
-interface Data { items: Item[]; other: Other[]; max_dur: Record<string, number>; limits: Record<string, number>; last_post: number | null; log: any[]; rerank: Rerank; postnow: PostNow; account: Account | null }
+interface Data { items: Item[]; max_dur: Record<string, number>; limits: Record<string, number>; last_post: number | null; log: any[]; postnow: PostNow; account: Account | null }
 
 const PLATS: { k: Plat; short: string; name: string; fields: [string, string, string | null][]; max: number }[] = [
   { k: "tiktok", short: "TT", name: "TikTok", fields: [["Caption", "caption", "tiktok"]], max: 600 },
@@ -28,7 +29,7 @@ const PLATS: { k: Plat; short: string; name: string; fields: [string, string, st
   { k: "x", short: "X", name: "X", fields: [["Post", "text", "x"]], max: 140 },
 ];
 const MAIN: Plat[] = ["tiktok", "youtube", "instagram"];
-type Tab = "todo" | "posted" | "skipped" | "other" | "all";
+type Tab = "todo" | "posted" | "skipped";
 /** The only account Claude may post as (queue/accounts.json). Post now and the auto-uploader stop on any other account. */
 function PostingAs({ account, save }: { account: Account | null; save: (name: string, handles: string) => void }) {
   const [open, setOpen] = useState(false), [name, setName] = useState(""), [handles, setHandles] = useState("");
@@ -57,14 +58,6 @@ export default function Queue() {
   const say = (t: string) => setMsg({ t, id: Date.now() });
   useEffect(() => { const q = new URLSearchParams(location.search); const t = q.get("tab") as Tab | null; if (t) setTab(t); if (q.get("id")) setSel(q.get("id")); }, []);
   const post = (path: string, body: Record<string, unknown>, ok?: string) => api(path, body).then(() => { if (ok) say(ok); reload(); }).catch(e => say(e.message));
-  const rr = d?.rerank, wasRunning = useRef(false);
-  useEffect(() => {   // tell when a re-rank finishes; poll faster while it runs
-    if (!rr) return;
-    if (wasRunning.current && !rr.running) say(rr.state === "error" ? `Re-rank failed: ${rr.error}`
-      : `Ranked ${rr.count ?? ""} clips${rr.added ? `, ${rr.added} added to the queue` : ""}${rr.held ? ` · ${rr.held} on hold` : ""}`);
-    wasRunning.current = rr.running;
-    if (rr.running) { const h = setTimeout(reload, 2000); return () => clearTimeout(h); }
-  }, [rr]);   // eslint-disable-line react-hooks/exhaustive-deps
   const pn = d?.postnow, wasPosting = useRef(false);
   useEffect(() => {   // live log while Claude posts; say when it's done
     if (!pn) return;
@@ -75,32 +68,26 @@ export default function Queue() {
 
   const list = useMemo(() => {
     if (!d) return [];
-    if (tab === "other") return [];
-    return d.items.filter(i => tab === "all" || (tab === "skipped" ? !done(i) && (!!i.skipped || !!i.hold) : tab === "posted" ? done(i) : !done(i) && !i.skipped && !i.hold));
+    const l = d.items.filter(i => tab === "skipped" ? !done(i) && (!!i.skipped || !!i.hold) : tab === "posted" ? done(i) : !done(i) && !i.skipped && !i.hold);
+    return tab === "todo" ? [...l].sort((a, b) => pay(b) - pay(a)) : l;   // paid campaign clips go out first
   }, [d, tab]);
   const counts = d ? { todo: d.items.filter(i => !done(i) && !i.skipped && !i.hold).length, posted: d.items.filter(done).length,
-    skipped: d.items.filter(i => !done(i) && (i.skipped || i.hold)).length, other: d.other.length, all: d.items.length } : null;
-  const item = d?.items.find(i => i.id === sel) || null, other = d?.other.find(o => o.id === sel) || null;
+    skipped: d.items.filter(i => !done(i) && (i.skipped || i.hold)).length } : null;
+  const item = d?.items.find(i => i.id === sel) || null;
   const opened = useRef(false);
   useEffect(() => {   // a link to one clip (?id=, e.g. right after a render): open the tab it's in
     if (!d || opened.current || !sel) return; opened.current = true;
     const it = d.items.find(i => i.id === sel);
-    if (d.other.some(o => o.id === sel)) setTab("other");
-    else if (it) setTab(done(it) ? "posted" : it.skipped || it.hold ? "skipped" : "todo");
+    if (it) setTab(done(it) ? "posted" : it.skipped || it.hold ? "skipped" : "todo");
   }, [d, sel]);
   useEffect(() => {   // keep a selection
-    if (!d || item || other) return;
-    const first = tab === "other" ? d.other[0]?.id : list[0]?.id; if (first) setSel(first);
-  }, [d, tab, item, other, list]);
+    if (!d || item) return;
+    const first = list[0]?.id; if (first) setSel(first);
+  }, [d, tab, item, list]);
 
   return (
     <div className="desk">
       <Nav>
-        <button className="btnx sm" disabled={!d || rr?.running}
-          onClick={() => post("/api/queue/rerank", { all: true }, `Claude is ranking ${d ? d.items.filter(i => !done(i)).length + d.other.length : ""} clips…`)}
-          title="Claude ranks every unposted clip, including the rendered ones not in the queue yet (they join the queue). Weak ones go on hold, which the auto-uploader skips. The auto-uploader follows this order.">
-          {rr?.running ? "Claude is ranking…" : `✦ Rank all ${d ? d.items.filter(i => !done(i)).length + d.other.length : ""} with Claude`}</button>
-        {rr?.order_at && !rr.running && <span className="lv-sub">ranked {ago(rr.order_at)}</span>}
         {d && <PostingAs account={d.account} save={(name, handles) => post("/api/queue/account", { name, handles }, `Posting as ${name}`)} />}
         <span className="lv-grow" />
         {d && <span className="lv-sub">{MAIN.map(p => `${PLATS.find(x => x.k === p)!.short} ${d.items.filter(i => i.state[p]?.posted).length}/${d.items.length}`).join(" · ")} · last post {ago(d.last_post)}</span>}
@@ -108,16 +95,11 @@ export default function Queue() {
       <div className="q-body">
         <aside className="q-list">
           <div className="lv-langs q-tabs">
-            {([["todo", "To post"], ["posted", "Posted"], ["skipped", "On hold"], ["other", "Not queued"], ["all", "All"]] as [Tab, string][]).map(([k, n]) =>
+            {([["todo", "To post"], ["posted", "Posted"], ["skipped", "On hold"]] as [Tab, string][]).map(([k, n]) =>
               <button key={k} className={tab === k ? "on" : ""} onClick={() => { setTab(k); setSel(null); }}>{n}<span>{counts?.[k] ?? ""}</span></button>)}
           </div>
           <div className="q-rows">
-            {tab === "other" ? d?.other.map(o => (
-              <button key={o.id} className={"q-row" + (sel === o.id ? " on" : "")} onClick={() => setSel(o.id)}>
-                <video src={o.video + "#t=0.5"} muted preload="metadata" />
-                <div><b>{o.title}</b><span>{o.creator || o.job} · {ago(o.updated)}</span><span className="q-name">{o.name}</span></div>
-              </button>
-            )) : list.map((i, k) => (
+            {list.map((i, k) => (
               <button key={i.id} className={"q-row" + (sel === i.id ? " on" : "")} onClick={() => setSel(i.id)}>
                 {i.video ? <video src={i.video + "#t=0.5"} muted preload="metadata" /> : <div className="q-novid" />}
                 <div>
@@ -126,15 +108,15 @@ export default function Queue() {
                   <span>{i.creator} · {fmtDur(i.duration)}{i.added ? " · added here" : ""}</span>
                   <span className="q-dots">{PLATS.map(p => <i key={p.k} className={i.state[p.k]?.posted ? "on" : ""} title={p.name}>{p.short}</i>)}
                     {!!i.warnings.length && <em title={i.warnings.join("\n")}>⚠ {i.warnings.length}</em>}{i.skipped && <em>skipped</em>}
-                    {i.hold && <em title={i.rank_reason || ""}>hold</em>}{i.pinned && !done(i) && <em className="q-next">next</em>}{done(i) && left(i).length > 0 && <em className="q-left">{left(i).join(" ")} left</em>}</span>
+                    {i.hold && <em title={i.rank_reason || ""}>hold</em>}{!!paid(i).length && <em className="q-camp" title={paid(i).map(c => c.name).join(", ")}>$ {paid(i)[0].rate ? `${paid(i)[0].rate}/1K` : "pool"}</em>}{i.pinned && !done(i) && <em className="q-next">next</em>}{done(i) && left(i).length > 0 && <em className="q-left">{left(i).join(" ")} left</em>}</span>
                 </div>
               </button>
             ))}
-            {d && (tab === "other" ? !d.other.length : !list.length) && <div className="lv-none">Nothing here.</div>}
+            {d && !list.length && <div className="lv-none">{tab === "todo" ? "Nothing to post yet: clips Claude keeps land here by themselves." : "Nothing here."}</div>}
           </div>
         </aside>
         <main className="q-detail">
-          {item ? <ItemDetail key={item.id} i={item} d={d!} post={post} /> : other ? <OtherDetail key={other.id} o={other} post={post} pn={d!.postnow} /> :
+          {item ? <ItemDetail key={item.id} i={item} d={d!} post={post} /> :
             <div className="lv-none">Select a clip.</div>}
         </main>
       </div>
@@ -161,9 +143,8 @@ function ItemDetail({ i, d, post }: { i: Item; d: Data; post: (p: string, b: Rec
           : <button className="lv-clipbtn q-postnext" onClick={() => post("/api/queue/next", { id: i.id }, "Posts next: first in line for the auto-uploader")}>▶ Post next</button>)}
         <div className="q-acts">
           <a className="btnx" href={editUrl(i.job, i.name)} target="_blank" rel="noreferrer">✎ Edit clip</a>
-          {i.skipped ? <button className="btnx" onClick={() => post("/api/queue/skip", { id: i.id, skip: false }, "The auto-uploader may post it again")}>Allow auto-upload</button>
-            : <button className="btnx" onClick={() => post("/api/queue/skip", { id: i.id, skip: true }, "The auto-uploader will skip it")}>Skip auto-upload</button>}
-          {i.added && <button className="btnx" onClick={() => post("/api/queue/remove", { id: i.id }, "Removed from the queue")}>Remove</button>}
+          {i.skipped && <button className="btnx" onClick={() => post("/api/queue/skip", { id: i.id, skip: false }, "The auto-uploader may post it again")}>Allow auto-upload</button>}
+          {!done(i) && <button className="btnx" onClick={() => post("/api/queue/remove", { id: i.id }, "Removed from the queue")}>Remove</button>}
         </div>
       </div>
       <div className="q-right">
@@ -172,6 +153,8 @@ function ItemDetail({ i, d, post }: { i: Item; d: Data; post: (p: string, b: Rec
         {i.rank_reason && <div className={"note" + (i.hold ? " warn" : "")} style={{ marginTop: 10 }}>
           <b>{i.hold ? "On hold" : `#${i.rank} in the posting order`}</b>: {i.rank_reason}</div>}
         {i.why && <div className="note" style={{ marginTop: i.rank_reason ? 0 : 10 }}>{i.why}</div>}
+        {(i.campaigns || []).map(c => <div key={c.id} className={"note" + (c.eligible ? "" : " warn")}>
+          <b>$ {c.name}</b> · {c.rate ? `$${c.rate} per 1K views` : c.pool || "pool"}{c.eligible ? ": its link is submitted after posting" : `: ${c.problems.join("; ")}`}</div>)}
         {i.skipped && <div className="note warn">Skipped by the auto-uploader: {i.skipped.reason}</div>}
         {i.warnings.map(w => <div key={w} className="note warn">⚠ {w}</div>)}
         <div className="seg q-ptabs">
@@ -230,23 +213,4 @@ function PostNowBox({ id, pn, post, left: todo }: { id: string; pn: PostNow; pos
     </button>
     {mine && !pn.running && (pn.result || pn.error) && <div className={"note" + (pn.error ? " warn" : "")}><b>Last Post now:</b> {pn.error || pn.result}</div>}
   </>);
-}
-
-function OtherDetail({ o, post, pn }: { o: Other; post: (p: string, b: Record<string, unknown>, ok?: string) => void; pn: PostNow }) {
-  return (
-    <div className="q-grid">
-      <div className="q-left"><Player src={o.video} /></div>
-      <div className="q-right">
-        <div className="q-title">{o.title}</div>
-        <div className="lv-sub">{o.creator || o.job} · edits/{o.name}.mp4 · rendered {ago(o.updated)}</div>
-        <div className="note" style={{ marginTop: 12 }}>Not in the posting queue yet. <b>Post next</b> adds it and puts it first in line for the auto-uploader; <b>Add to queue</b> just adds it. Either way it gets post text for every platform (from its title and the creator), which you can edit here.</div>
-        <div style={{ marginTop: 12 }}><PostNowBox id={o.id} pn={pn} post={post} left={["TT", "YT", "IG"]} /></div>
-        <div className="q-acts">
-          <button className="lv-clipbtn" onClick={() => post("/api/queue/next", { id: o.id }, "Added and posts next")}>▶ Post next</button>
-          <button className="btnx" onClick={() => post("/api/queue/add", { job: o.job, name: o.name }, "Added to the queue")}>＋ Add to queue</button>
-          <a className="btnx" href={editUrl(o.job, o.name)} target="_blank" rel="noreferrer">✎ Edit clip</a>
-        </div>
-      </div>
-    </div>
-  );
 }

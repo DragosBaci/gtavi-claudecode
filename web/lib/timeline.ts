@@ -1,7 +1,7 @@
 // Timeline canvas (source time): ruler, labeled bars (clip, hook, cuts, keeps), filmstrip, waveform, playhead.
 // Drag the clip edges or the hook, click to seek, shift-drag (or drag on the waveform) to select a range.
 import { LNAME } from "./constants";
-import { clearSel, pushUndo, sync, saveDraft, patch } from "./actions";
+import { clearSel, pushUndo, saveDraft, patch } from "./actions";
 import { E, seek, tNow, vMax, vMin } from "./engine";
 import { mainPieces } from "./plan";
 import { rr } from "./preview";
@@ -145,7 +145,7 @@ export function attachTimeline(cv: HTMLCanvasElement) {
   const up = () => {
     if (!drag) return; const d = drag; drag = null;
     if (d.h === "sel") { const s = ed().sel; if (s && s[1] - s[0] < 0.08) clearSel(); }
-    if (EDGES.includes(d.h)) { saveDraft(); sync.dirty = d.h.startsWith("tease") ? "moved the hook" : "trimmed the clip"; }
+    if (EDGES.includes(d.h)) saveDraft();
     drawTimeline();
   };
   const wheel = (e: WheelEvent) => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); setZoom(ed().zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)); };

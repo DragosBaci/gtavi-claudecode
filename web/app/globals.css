@@ -22,9 +22,6 @@ svg{display:block}
 .pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--edge);background:rgba(255,255,255,.03);border-radius:12px;padding:8px 14px;color:var(--text);white-space:nowrap;max-width:100%}
 .pill:hover{background:var(--hover)}
 .pill .t{overflow:hidden;text-overflow:ellipsis;max-width:300px}
-.peers{display:flex;align-items:center}
-.peers i{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-style:normal;font-size:12px;font-weight:700;color:#1b1412;margin-left:-6px;box-shadow:0 0 0 2px #1d1615}
-.peers i:first-child{margin-left:0}
 .me{cursor:pointer}
 .src{color:var(--mute);font-size:13px;padding:0 26px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .restored{display:none;margin:4px 26px 8px;color:#ffd99a;font-size:13px;align-items:center;gap:10px}
@@ -163,13 +160,6 @@ pre.code{font:11.5px/1.5 ui-monospace,Menlo,monospace;background:rgba(0,0,0,.3);
 .sheetfoot{display:flex;gap:10px;margin-top:16px;align-items:center}
 .sheetfoot .grow{flex:1}
 /* live cursors */
-#cursors{position:fixed;inset:0;pointer-events:none;z-index:60}
-.pcur{position:absolute;left:0;top:0;transition:transform .16s linear;will-change:transform}
-.pcur.agent{transition:transform .55s cubic-bezier(.45,.05,.25,1)}
-.pcur svg{width:26px;height:26px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}
-.pcur .tag{position:absolute;left:22px;top:20px;padding:4px 11px;border-radius:999px;font-size:14px;font-weight:600;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.35)}
-.pcur .say{position:absolute;left:22px;top:52px;padding:6px 11px;border-radius:12px;font-size:13px;background:rgba(30,24,22,.92);color:var(--text);border:1px solid var(--edge);white-space:nowrap;display:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}
-.pcur .say.show{display:block}
 .ripple{position:fixed;width:30px;height:30px;margin:-15px 0 0 -15px;border-radius:50%;border:2px solid;pointer-events:none;z-index:61;animation:rip .5s ease-out forwards}
 @keyframes rip{from{transform:scale(.3);opacity:1}to{transform:scale(1.6);opacity:0}}
 .toast{position:fixed;left:50%;top:22px;transform:translateX(-50%) translateY(-10px);background:rgba(48,38,36,.95);border:1px solid var(--edge);border-radius:14px;padding:10px 16px;opacity:0;transition:.2s;z-index:70;pointer-events:none;max-width:70vw}
@@ -477,6 +467,7 @@ kbd{font:11px ui-monospace,Menlo,monospace;border:1px solid var(--edge);border-r
 .pk-rkb{position:absolute;left:7px;top:7px;font:700 11.5px ui-monospace,Menlo,monospace;padding:2px 7px;border-radius:6px;background:rgba(0,0,0,.75)}
 .pk-rkb.v-keep{background:var(--lime);color:var(--lime-ink)}
 .pk-rkb.v-drop{background:rgba(160,30,30,.85);color:#fff}
+.dk-pk .pk-rkb{position:static;flex:none}
 .pk-why{font-size:12.5px;line-height:1.35}
 .pk-card.dropped{opacity:.62}
 .pk-card.dropped:hover{opacity:1}
@@ -486,3 +477,16 @@ kbd{font:11px ui-monospace,Menlo,monospace;border:1px solid var(--edge);border-r
 .pk-nowi{margin-top:10px}
 .pk-nowt{display:flex;align-items:baseline;gap:10px;font-size:13.5px;margin-bottom:6px;min-width:0}
 .pk-nowt span{color:var(--mute);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Earn: paid campaigns */
+.ern-c.on{border-color:rgba(201,242,110,.35)}
+.ern-ch{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.ern-ct{flex:1;display:flex;flex-direction:column;gap:3px;min-width:220px}
+.ern-earn{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--soft);margin-bottom:12px}
+.ern-ov{height:40px;max-width:120px;object-fit:contain;background:repeating-conic-gradient(#555 0 25%,#333 0 50%) 0 0/12px 12px;border-radius:6px}
+.ern-sub{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.ern-sub:last-child{border-bottom:0}
+.ern-sub>div{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+.ern-sel{width:auto;padding:5px 8px}
+.pk-go.armed{background:#ffd99a}
+.q-camp{color:var(--lime)}
+.ern-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

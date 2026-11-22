@@ -12,7 +12,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from common import VIDEO_FMT, ffprobe, is_url, job_dir, load_json, run, save_json, tool, ytdlp_base, ytdlp_json
 
-HYPE = re.compile(r"\b(no way|oh my god|omg|what|wait|bro|let'?s go|holy|insane|crazy|yo+|wtf|dude|look at|nah|run|go go)\b", re.I)
+# Matched on the running transcript (phrases span words). Only strong reactions: everyday words like "what", "wait",
+# "bro" or "run" are said every few seconds on a stream and used to drown the real spikes.
+HYPE = re.compile(r"\b(no way|oh my god|oh my gosh|omg|let'?s go+|holy (?:shit|crap|moly|cow)|insane|crazy|wtf|"
+                  r"what the (?:hell|fuck|heck|f)|are you (?:serious|kidding)|look at (?:this|that)|yo+o+|go go|"
+                  r"bro what|ain'?t no way|i'?m crying|i can'?t breathe|that'?s crazy|bruh+|oh hell no|hell nah)\b", re.I)
 CHAT_HYPE = re.compile(r"(LMAO|LOL|KEKW|OMEGALUL|W+\b|CLIP|💀|😂|🔥|NO WAY|HOLY)", re.I)
 
 
@@ -140,9 +144,14 @@ def score(d, source, info, dur, db, words, top=8, min_len=15, max_len=40, chat_a
     # signals
     loud = smooth(np.clip(z(db - smooth(db, 30)), 0, None), 3)          # jumps above the local level
     hype = np.zeros(n)
+    text, at = "", []   # running transcript; at[k] = start second of the word that char k belongs to
     for w in words:
-        if HYPE.search(w["w"]) and int(w["s"]) < n:
-            hype[int(w["s"])] += 1
+        t = w["w"].lower() + " "
+        text += t; at += [w["s"]] * len(t)
+    for m in HYPE.finditer(text):
+        sec = int(at[m.start()])
+        if sec < n:
+            hype[sec] += 1
     hype = smooth(hype, 5)
     heat = np.zeros(n)
     for h in (info.get("heatmap") or []):
@@ -159,6 +168,8 @@ def score(d, source, info, dur, db, words, top=8, min_len=15, max_len=40, chat_a
     for p in order:
         if len(picks) >= a.top or score[p] <= 0:
             break
+        if used[int(p)]:   # inside a window already picked: skip before the word scan below (it is O(words))
+            continue
         s0 = max(0, p - 0.55 * a.max); e0 = min(dur, s0 + a.max)
         # snap start to the first word after s0 and end to a word end, keep length in [min, max]
         ws = [x for x in words if x["s"] >= s0 and x["e"] <= e0]
