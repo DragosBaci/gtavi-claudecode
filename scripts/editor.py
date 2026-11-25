@@ -543,9 +543,11 @@ def queue_post(path, body):
         if not (U.jload(U.ACCOUNT, None) or {}).get("name"):
             raise ValueError("set the account you post as first (Posting as, at the top of this page)")
         U.jsave(U.UP / "postnow.json", {"state": "running", "id": cid, "started": time.time(), "pid": None})
-        pr = subprocess.Popen([sys.executable, str(HERE / "post_now.py"), cid], cwd=str(ROOT), stdout=subprocess.DEVNULL,
+        only = [p for p in body.get("platforms") or [] if p in ("youtube", "tiktok", "instagram")]
+        pr = subprocess.Popen([sys.executable, str(HERE / "post_now.py"), cid, *(["--only", ",".join(only)] if only else [])],
+                              cwd=str(ROOT), stdout=subprocess.DEVNULL,
                               stderr=open(U.UP / "postnow.err", "w"), start_new_session=True)
-        U.jsave(U.UP / "postnow.json", {"state": "running", "id": cid, "started": time.time(), "pid": pr.pid})
+        U.jsave(U.UP / "postnow.json", {**U.jload(U.UP / "postnow.json", {}), "state": "running", "id": cid, "pid": pr.pid, "only": only})
         return {"ok": True}
     if path == "/api/queue/postnow/stop":
         pn = U.jload(U.UP / "postnow.json", {})

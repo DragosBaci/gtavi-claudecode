@@ -6,7 +6,7 @@ queue/state.json. Every safety rule of the skill applies (right account, no pass
 copyright flags). Permissions for this run only: Chrome on those three sites, scripts/uploader.py, frame grabs.
 
 Status for the page: queue/uploads/postnow.json, log: queue/uploads/postnow.log.
-usage: python scripts/post_now.py <job>/<clip name>      (from the clip desk folder)
+usage: python scripts/post_now.py <job>/<clip name> [--only youtube,tiktok]      (from the clip desk folder)
 """
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -28,8 +28,13 @@ def status(**kw):
 
 def main():
     cid = sys.argv[1]
+    only = []   # --only youtube,tiktok: post on these platforms and leave the others alone
+    if "--only" in sys.argv:
+        only = [p for p in sys.argv[sys.argv.index("--only") + 1].split(",") if p in ("youtube", "tiktok", "instagram")]
+    names = {"youtube": "YouTube Shorts", "tiktok": "TikTok", "instagram": "Instagram Reels"}
+    where = ", ".join(names[p] for p in (only or names))
     it = U.item(cid)
-    status(state="running", id=cid, title=it["title"], started=time.time(), pid=os.getpid(), finished=None, error=None)
+    status(state="running", id=cid, title=it["title"], started=time.time(), pid=os.getpid(), finished=None, error=None, only=only)
     acct = U.jload(U.ACCOUNT, None)
     if not (acct or {}).get("name"):
         status(state="error", error="Set the account you post as first (Posting as, at the top of the Queue page)", finished=time.time())
@@ -45,10 +50,14 @@ def main():
         "ClaudeInChromeDomain(whop.com)", "ClaudeInChromeDomain(www.whop.com)", "ClaudeInChromeDomain(www.clip.tech)",
         "mcp__claude-in-chrome", "Read", "Glob",
         f"Bash({upl}:*)", "Bash(ffmpeg -v error -y -ss:*)",
+        # the same uploader by its short paths: the headless run sometimes types it that way, and a prompt nobody answers stops it
+        "Bash(.venv/bin/python tool/scripts/uploader.py:*)", f"Bash({py} tool/scripts/uploader.py:*)", "Bash(python3 tool/scripts/uploader.py:*)",
     ]}})
     prompt = f"""Post this clip now: {cid} ("{it['title']}").
-The human pressed "Post now" on the Queue page for exactly this clip. That click is their approval to publish it:
-go all the way and actually publish it on every pending platform (YouTube Shorts, TikTok, Instagram Reels).
+The human pressed "Post now" on the Queue page for exactly this clip ({cid}). That click is their approval to publish
+THIS clip only. Never choose a clip from `status` or the queue order, never post any other clip: the uploader refuses
+every other id during this run. Publish it:
+go all the way and actually publish it on every pending platform among: {where}.{' Post ONLY there: do not open or post to any other platform, even if it is pending.' if only else ''}
 Don't save drafts, don't schedule, don't stop to ask; nobody is watching the run.
 
 Read {SKILL} and follow it for this one clip, skipping steps 1 and 2 (no timing check,
@@ -64,7 +73,11 @@ no ranking: this clip was chosen). In it, UPL means exactly `{upl}`. Post only a
   move on. Skip a platform only for the skill's hard stops: wrong account, logged out, CAPTCHA or verification code
   (never type a password or solve a CAPTCHA), or an actual copyright claim / block shown by the platform. A failed
   upload or a page that didn't load: retry that platform once before skipping it.
+- Links: copy each post's link from the page text (read_page, find or javascript on the share/link field), never by
+  reading it off a screenshot: I and l, O and 0 look alike there and one wrong letter makes the link dead.
 - Step 5b: if `mark` printed "to submit", submit those campaign links (campaign-submit skill, its hard stops apply).
+  Campaigns only take a post within 30 minutes of publishing. If one answers that it can't read a brand-new Short yet,
+  wait 2 minutes and try again, up to 4 times, before giving up.
 - Step 6: finish and close the tabs you opened.
 Notifications aren't available here: put anything the human must know in your final reply instead.
 End with one line per platform: posted + link, or skipped + why.

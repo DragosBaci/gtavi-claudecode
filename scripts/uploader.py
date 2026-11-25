@@ -319,6 +319,22 @@ def account(name, handles):
     print(json.dumps(jload(ACCOUNT, None), ensure_ascii=False))
 
 
+def postnow_guard(cid, platform=None):
+    """While a Post now run is going (queue/uploads/postnow.json), only its clip, and only its platforms when it was
+    limited to some, may be prepared or marked: a headless run that wanders to another clip is stopped here."""
+    pn = jload(UP / "postnow.json", {})
+    if pn.get("state") != "running" or not pn.get("pid"):
+        return
+    try:
+        os.kill(int(pn["pid"]), 0)
+    except (OSError, ValueError):
+        return
+    if pn.get("id") and cid != pn["id"]:
+        sys.exit(f"refused: this Post now run is for {pn['id']} only, not {cid}. Post that clip, or nothing.")
+    if platform and pn.get("only") and platform not in pn["only"]:
+        sys.exit(f"refused: this Post now run posts only on {', '.join(pn['only'])}, not {platform}.")
+
+
 def unskip(cid):
     s = jload(SKIPS, {}); s.pop(cid, None); jsave(SKIPS, s); log(event="unskipped", id=cid)
 
@@ -345,6 +361,8 @@ def main():
     sb = sub.add_parser("submitted"); sb.add_argument("id"); sb.add_argument("platform"); sb.add_argument("campaign")
     sb.add_argument("--status", default="submitted"); sb.add_argument("--note", default="")
     a = ap.parse_args()
+    if a.cmd in ("frames", "prepare", "mark"):
+        postnow_guard(a.id, getattr(a, "platform", None))
     if a.cmd == "status": status()
     elif a.cmd == "account": account(a.name, a.handle)
     elif a.cmd == "frames": frames(a.id)
